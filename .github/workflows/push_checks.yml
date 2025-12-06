@@ -1,0 +1,536 @@
+name: Push Checks (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      skip-tests:
+        required: false
+        type: boolean
+        default: false
+      coverage-min:
+        required: false
+        type: number
+        default: 60
+        description: "Porcentaje mínimo de coverage requerido"
+      fail-on-lint-errors:
+        required: false
+        type: boolean
+        default: false
+      fail-on-security-audit:
+        required: false
+        type: boolean
+        default: false
+      build-docker-image:
+        required: false
+        type: boolean
+        default: false
+        description: "⚠️ DEPRECADO: Usar deploy-staging.yml para builds de Docker. Este parámetro ya no se usa en push_checks.yml"
+      docker-registry:
+        required: false
+        type: string
+        default: "ghcr.io"
+        description: "Registro de Docker (ghcr.io, docker.io, etc.)"
+      docker-image-name:
+        required: false
+        type: string
+        description: "Nombre de la imagen Docker (ej: org/app-name)"
+      docker-build-args:
+        required: false
+        type: string
+        default: ""
+        description: "Build args para Docker (formato: KEY1=val1,KEY2=val2 o multilinea KEY=val)"
+      enable-sonarcloud:
+        required: false
+        type: boolean
+        default: false
+        description: "Ejecutar análisis de SonarCloud"
+      sonarcloud-organization:
+        required: false
+        type: string
+        description: "Organización de SonarCloud"
+      sonarcloud-project-key:
+        required: false
+        type: string
+        description: "Project key de SonarCloud"
+      # Variables públicas como inputs (el caller las pasa desde vars)
+      BASE_URL:
+        required: false
+        type: string
+        description: "Base URL for the application (build time)"
+      NEXTAUTH_URL:
+        required: false
+        type: string
+        description: "NextAuth base URL"
+      NEXT_PUBLIC_BASE_URL:
+        required: false
+        type: string
+        description: "Public base URL for Next.js"
+      SMTP_HOST:
+        required: false
+        type: string
+        description: "SMTP server host"
+      SMTP_PORT:
+        required: false
+        type: string
+        description: "SMTP server port"
+      SMTP_USER:
+        required: false
+        type: string
+        description: "SMTP username"
+    secrets:
+      CR_PAT:
+        required: false
+        description: "Personal Access Token para GHCR"
+      SONAR_TOKEN:
+        required: false
+        description: "Token de autenticación de SonarCloud"
+      DATABASE_URL:
+        required: false
+        description: "Database connection URL"
+      NEXTAUTH_SECRET:
+        required: false
+        description: "NextAuth secret key"
+      AUTH_SECRET:
+        required: false
+        description: "Auth secret key"
+      SMTP_PASS:
+        required: false
+        description: "SMTP password"
+
+permissions:
+  contents: read
+  pull-requests: write  # Necesario para comentar en PRs
+
+jobs:
+  # ==============================
+  #  JOB 1: DETECCIÓN DE LENGUAJE
+  # ==============================
+  detect-language:
+    name: Detectar Lenguaje
+    runs-on: ubuntu-latest
+    outputs:
+      language: ${{ steps.detect.outputs.lang }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f "pyproject.toml" ]; then
+            echo "lang=python" >> $GITHUB_OUTPUT
+            echo "🐍 Proyecto Python detectado"
+          elif [ -f "package.json" ]; then
+            if grep -q '"typescript"' package.json || [ -f "tsconfig.json" ]; then
+              echo "lang=typescript" >> $GITHUB_OUTPUT
+              echo "📘 Proyecto TypeScript detectado"
+            else
+              echo "lang=javascript" >> $GITHUB_OUTPUT
+              echo "📙 Proyecto JavaScript detectado"
+            fi
+          else
+            echo "lang=unknown" >> $GITHUB_OUTPUT
+            echo "❓ Lenguaje no detectado"
+          fi
+
+
+  # ==============================
+  #  JOB 2: LINT (UNIVERSAL)
+  # ==============================
+  lint:
+    name: Lint Checks
+    needs: detect-language
+    if: needs.detect-language.outputs.language != 'unknown'
+    uses: ./.github/workflows/lint.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      fail-on-lint-errors: ${{ inputs.fail-on-lint-errors }}
+      fail-on-security-audit: ${{ inputs.fail-on-security-audit }}
+
+  # ==============================
+  #  JOB 3: BUILD (UNIVERSAL)
+  # ==============================
+  build:
+    name: Build Packages
+    needs: [detect-language, lint]
+    if: |
+      needs.detect-language.outputs.language != 'unknown' &&
+      needs.lint.result == 'success'
+    uses: ./.github/workflows/build.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      # Variables públicas como inputs (vienen de inputs de push_checks)
+      BASE_URL: ${{ inputs.BASE_URL }}
+      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
+      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
+      SMTP_HOST: ${{ inputs.SMTP_HOST }}
+      SMTP_PORT: ${{ inputs.SMTP_PORT }}
+      SMTP_USER: ${{ inputs.SMTP_USER }}
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+  # ==============================
+  #  JOB 4: TESTS & COVERAGE (UNIVERSAL)
+  # ==============================
+  tests:
+    name: Tests & Coverage
+    needs: [detect-language, lint, build]
+    if: |
+      needs.detect-language.outputs.language != 'unknown' &&
+      needs.lint.result == 'success' &&
+      needs.build.result == 'success'
+    uses: ./.github/workflows/test.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      coverage-min: ${{ inputs.coverage-min }}
+      skip-tests: ${{ inputs.skip-tests }}
+      # Variables públicas como inputs (vienen de inputs de push_checks)
+      BASE_URL: ${{ inputs.BASE_URL }}
+      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
+      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
+      SMTP_HOST: ${{ inputs.SMTP_HOST }}
+      SMTP_PORT: ${{ inputs.SMTP_PORT }}
+      SMTP_USER: ${{ inputs.SMTP_USER }}
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+  # ==============================
+  #  JOB 7: SONARCLOUD ANALYSIS (JS/TS) - DESHABILITADO
+  # ==============================
+  # NOTA: Este job ha sido comentado. Para habilitar SonarCloud:
+  # 1. Descomentar este job
+  # 2. Configurar secrets en GitHub: SONAR_TOKEN
+  # 3. Pasar enable-sonarcloud: true al llamar este workflow
+  #
+  # sonarcloud-analysis:
+  #   name: SonarCloud Analysis
+  #   runs-on: ubuntu-latest
+  #   needs: [detect-language, lint, tests]
+  #   if: |
+  #     inputs.enable-sonarcloud == true &&
+  #     (needs.detect-language.outputs.language == 'javascript' ||
+  #      needs.detect-language.outputs.language == 'typescript')
+  #   outputs:
+  #     quality_gate_status: ${{ steps.sonar.outputs.quality_gate_status }}
+  #
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0  # Shallow clones should be disabled for better analysis
+  #
+  #     - name: Download coverage report
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         name: js-ts-coverage-${{ github.run_id }}
+  #         path: coverage/
+  #       continue-on-error: true
+  #
+  #     - name: Check coverage files
+  #       run: |
+  #         if [ -f "coverage/lcov.info" ]; then
+  #           echo "✅ Coverage report found"
+  #           ls -lh coverage/
+  #         else
+  #           echo "⚠️ No coverage report found, SonarCloud will run without coverage data"
+  #         fi
+  #
+  #     - name: SonarCloud Scan
+  #       id: sonar
+  #       uses: SonarSource/sonarcloud-github-action@master
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #       with:
+  #         args: >
+  #           -Dsonar.organization=${{ inputs.sonarcloud-organization }}
+  #           -Dsonar.projectKey=${{ inputs.sonarcloud-project-key }}
+  #           -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+  #           -Dsonar.typescript.lcov.reportPaths=coverage/lcov.info
+  #           -Dsonar.exclusions=**/*.spec.ts,**/*.test.ts,**/*.spec.js,**/*.test.js,**/node_modules/**,**/dist/**,**/build/**,**/.next/**
+  #
+  #     - name: SonarCloud Quality Gate check
+  #       id: quality_gate
+  #       run: |
+  #         # Obtener el estado del Quality Gate
+  #         QUALITY_GATE_STATUS="${{ steps.sonar.outputs.quality-gate-status }}"
+  #
+  #         if [ "$QUALITY_GATE_STATUS" == "PASSED" ] || [ "$QUALITY_GATE_STATUS" == "OK" ]; then
+  #           echo "✅ Quality Gate passed"
+  #           echo "quality_gate_status=passed" >> $GITHUB_OUTPUT
+  #           exit 0
+  #         else
+  #           echo "❌ Quality Gate failed: $QUALITY_GATE_STATUS"
+  #           echo "quality_gate_status=failed" >> $GITHUB_OUTPUT
+  #           echo "::warning::SonarCloud Quality Gate failed. Check the SonarCloud dashboard for details."
+  #           exit 0  # No fallar el workflow, solo advertir
+  #         fi
+
+  # ==============================
+  #  JOB 8: BUILD DOCKER IMAGE (Python) - DESHABILITADO
+  # ==============================
+  # NOTA: Este job ha sido deshabilitado para push_checks.yml
+  # Para hacer deploy a STG, usar el workflow deploy-staging.yml con:
+  #   - workflow_dispatch (manual trigger)
+  #   - Label "deploy:staging" en commits
+  #
+  # build-docker-python:
+  #   name: Build & Push Docker Image (Python)
+  #   needs: [detect-language, lint, tests]
+  #   if: false  # Siempre deshabilitado en push_checks
+  #   uses: ./.github/workflows/docker-build-python.yml
+  #   with:
+  #     python-version: ${{ inputs.python-version }}
+  #     docker-registry: ${{ inputs.docker-registry }}
+  #     docker-image-name: ${{ inputs.docker-image-name }}
+  #   secrets:
+  #     CR_PAT: ${{ secrets.CR_PAT }}
+  #   permissions:
+  #     contents: read
+  #     packages: write
+
+  # ==============================
+  #  JOB 9: LENGUAJE DESCONOCIDO
+  # ==============================
+  unknown-language:
+    name: Lenguaje Desconocido
+    runs-on: ubuntu-latest
+    needs: detect-language
+    if: needs.detect-language.outputs.language == 'unknown'
+
+    steps:
+      - name: Unsupported project type
+        run: echo "::warning::No se detectó lenguaje soportado (ni pyproject.toml ni package.json)"
+
+  # ==============================
+  #  JOB 10: RESUMEN FINAL
+  # ==============================
+  workflow-summary:
+    name: Resumen del Workflow
+    runs-on: ubuntu-latest
+    needs: [detect-language, lint, build, tests, unknown-language]
+    if: always()
+
+    steps:
+      - name: Generate Workflow Summary
+        run: |
+          echo "## 📊 Resumen del Workflow" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Información General:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔤 Lenguaje: \`${{ needs.detect-language.outputs.language }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔢 Node version: \`${{ inputs.node-version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐍 Python version: \`${{ inputs.python-version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 📅 Fecha: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Resumen según el lenguaje detectado
+          LANGUAGE="${{ needs.detect-language.outputs.language }}"
+
+          if [ "$LANGUAGE" == "typescript" ] || [ "$LANGUAGE" == "javascript" ]; then
+            echo "### 🔍 JavaScript/TypeScript Checks" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Estado del job de Lint (universal)
+            LINT_JOB_STATUS="${{ needs.lint.result }}"
+            if [ "$LINT_JOB_STATUS" == "success" ]; then
+              echo "- ✅ **Lint & Checks Job**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            elif [ "$LINT_JOB_STATUS" == "failure" ]; then
+              echo "- ❌ **Lint & Checks Job**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Lint & Checks Job**: $LINT_JOB_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Estado del job de Build
+            BUILD_JOB_STATUS="${{ needs.build.result }}"
+            if [ "$BUILD_JOB_STATUS" == "success" ]; then
+              echo "- ✅ **Build Job**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            elif [ "$BUILD_JOB_STATUS" == "failure" ]; then
+              echo "- ❌ **Build Job**: Falló al construir paquetes" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Build Job**: $BUILD_JOB_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Security Audit
+            AUDIT_OUTCOME="${{ needs.lint.outputs.audit_outcome }}"
+            if [ "$AUDIT_OUTCOME" == "success" ]; then
+              echo "- ✅ **Security Audit**: Pasó" >> $GITHUB_STEP_SUMMARY
+            elif [ "$AUDIT_OUTCOME" == "failure" ]; then
+              echo "- ❌ **Security Audit**: Falló (vulnerabilidades encontradas)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Security Audit**: Saltado" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Lint (ESLint)
+            LINT_OUTCOME="${{ needs.lint.outputs.lint_outcome }}"
+            if [ "$LINT_OUTCOME" == "success" ]; then
+              echo "- ✅ **ESLint**: Pasó sin errores" >> $GITHUB_STEP_SUMMARY
+            elif [ "$LINT_OUTCOME" == "failure" ]; then
+              echo "- ❌ **ESLint**: Falló con errores" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **ESLint**: Saltado" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # TypeCheck
+            TYPECHECK_OUTCOME="${{ needs.lint.outputs.typecheck_outcome }}"
+            if [ "$TYPECHECK_OUTCOME" == "success" ]; then
+              echo "- ✅ **TypeCheck**: Pasó sin errores" >> $GITHUB_STEP_SUMMARY
+            elif [ "$TYPECHECK_OUTCOME" == "failure" ]; then
+              echo "- ❌ **TypeCheck**: Falló (errores de tipo)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **TypeCheck**: Saltado (no es TypeScript)" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Estado del job de Tests
+            TESTS_JOB_STATUS="${{ needs.tests.result }}"
+            if [ "$TESTS_JOB_STATUS" == "success" ]; then
+              echo "- ✅ **Tests & Coverage Job**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            elif [ "$TESTS_JOB_STATUS" == "failure" ]; then
+              echo "- ❌ **Tests & Coverage Job**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Tests & Coverage Job**: $TESTS_JOB_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Tests
+            TESTS_OUTCOME="${{ needs.tests.outputs.tests_outcome }}"
+            TESTS_PASSED="${{ needs.tests.outputs.tests_passed }}"
+            TESTS_FAILED="${{ needs.tests.outputs.tests_failed }}"
+            if [ "$TESTS_OUTCOME" == "success" ]; then
+              if [ "${{ needs.tests.outputs.tests_skipped }}" == "true" ]; then
+                echo "- ⚠️ **Tests**: No configurados" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ✅ **Tests**: Todos pasaron ($TESTS_PASSED tests)" >> $GITHUB_STEP_SUMMARY
+              fi
+            elif [ "$TESTS_OUTCOME" == "failure" ]; then
+              echo "- ❌ **Tests**: $TESTS_FAILED fallaron, $TESTS_PASSED pasaron" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Tests**: Saltados" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # SonarCloud Analysis - COMENTADO
+            # NOTA: SonarCloud está deshabilitado. Para habilitarlo, descomentar el job sonarcloud-analysis
+            # if [ "${{ inputs.enable-sonarcloud }}" == "true" ]; then
+            #   SONAR_JOB_STATUS="${{ needs.sonarcloud-analysis.result }}"
+            #   QUALITY_GATE="${{ needs.sonarcloud-analysis.outputs.quality_gate_status }}"
+            #
+            #   if [ "$SONAR_JOB_STATUS" == "success" ]; then
+            #     echo "- ✅ **SonarCloud Analysis Job**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            #     if [ "$QUALITY_GATE" == "passed" ]; then
+            #       echo "  - ✅ Quality Gate: Passed" >> $GITHUB_STEP_SUMMARY
+            #     elif [ "$QUALITY_GATE" == "failed" ]; then
+            #       echo "  - ❌ Quality Gate: Failed" >> $GITHUB_STEP_SUMMARY
+            #     fi
+            #   elif [ "$SONAR_JOB_STATUS" == "failure" ]; then
+            #     echo "- ❌ **SonarCloud Analysis Job**: Falló" >> $GITHUB_STEP_SUMMARY
+            #   elif [ "$SONAR_JOB_STATUS" == "skipped" ]; then
+            #     echo "- ⏭️ **SonarCloud Analysis**: Deshabilitado" >> $GITHUB_STEP_SUMMARY
+            #   fi
+            #   echo "" >> $GITHUB_STEP_SUMMARY
+            # fi
+
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "💡 **Tip**: Si hay fallos, descarga los logs desde la sección de Artifacts" >> $GITHUB_STEP_SUMMARY
+
+          elif [ "$LANGUAGE" == "python" ]; then
+            echo "### 🐍 Python Checks" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Lint status
+            LINT_STATUS="${{ needs.lint.result }}"
+            CRITICAL_ERRORS="${{ needs.lint.outputs.has_critical_errors }}"
+            TOTAL_ERRORS="${{ needs.lint.outputs.total_errors }}"
+            TOTAL_WARNINGS="${{ needs.lint.outputs.total_warnings }}"
+
+            if [ "$LINT_STATUS" == "success" ]; then
+              if [ "$TOTAL_ERRORS" -gt 0 ] 2>/dev/null; then
+                echo "- ⚠️ **Lint (Ruff)**: $TOTAL_ERRORS errores no críticos, $TOTAL_WARNINGS warnings" >> $GITHUB_STEP_SUMMARY
+                echo "  - 💡 Ejecuta \`ruff check . --fix\` localmente para corregir" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ✅ **Lint (Ruff)**: Pasó sin errores críticos" >> $GITHUB_STEP_SUMMARY
+              fi
+            elif [ "$LINT_STATUS" == "failure" ]; then
+              echo "- ❌ **Lint (Ruff)**: Falló ($CRITICAL_ERRORS errores críticos)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Lint (Ruff)**: $LINT_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Build status
+            BUILD_STATUS="${{ needs.build.result }}"
+            if [ "$BUILD_STATUS" == "success" ]; then
+              echo "- ✅ **Build**: Paquete construido exitosamente" >> $GITHUB_STEP_SUMMARY
+            elif [ "$BUILD_STATUS" == "failure" ]; then
+              echo "- ❌ **Build**: Falló al construir el paquete" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Build**: $BUILD_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Tests y Coverage
+            PYTEST_OUTCOME="${{ needs.tests.outputs.pytest_outcome }}"
+            TESTS_PASSED="${{ needs.tests.outputs.tests_passed }}"
+            TESTS_FAILED="${{ needs.tests.outputs.tests_failed }}"
+            COVERAGE="${{ needs.tests.outputs.coverage_percent }}"
+            COVERAGE_OK="${{ needs.tests.outputs.coverage_ok }}"
+            HAS_CRITICAL="${{ needs.tests.outputs.has_critical_errors }}"
+
+            if [ "$PYTEST_OUTCOME" == "success" ]; then
+              echo "- ✅ **Tests**: Todos pasaron ($TESTS_PASSED tests)" >> $GITHUB_STEP_SUMMARY
+            elif [ "$PYTEST_OUTCOME" == "failure" ]; then
+              echo "- ❌ **Tests**: $TESTS_FAILED fallaron, $TESTS_PASSED pasaron" >> $GITHUB_STEP_SUMMARY
+
+              # Indicar si hay errores críticos
+              if [ "$HAS_CRITICAL" == "true" ]; then
+                echo "  - ⚠️ **Contiene errores CRÍTICOS** (Exception, ERROR, Fatal)" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ⚠️ **Tests**: No ejecutados o sin tests" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Coverage con indicador de suficiencia para Docker build
+            if [ -n "$COVERAGE" ] && [ "$COVERAGE" != "0" ]; then
+              if [ "$COVERAGE" -ge 80 ]; then
+                echo "- ✅ **Coverage**: ${COVERAGE}% (Excelente, suficiente para Docker build)" >> $GITHUB_STEP_SUMMARY
+              elif [ "$COVERAGE" -ge 60 ]; then
+                echo "- ✅ **Coverage**: ${COVERAGE}% (Aceptable, suficiente para Docker build)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ❌ **Coverage**: ${COVERAGE}% (Insuficiente, mínimo 60% para Docker build)" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ❌ **Coverage**: No disponible o 0%" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "💡 **Tip**: Descarga el reporte de coverage desde la sección de Artifacts" >> $GITHUB_STEP_SUMMARY
+
+          elif [ "$LANGUAGE" == "unknown" ]; then
+            echo "### ❓ Lenguaje Desconocido" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ No se detectó lenguaje soportado" >> $GITHUB_STEP_SUMMARY
+            echo "- 💡 Asegúrate de tener \`pyproject.toml\` (Python) o \`package.json\` (JavaScript/TypeScript)" >> $GITHUB_STEP_SUMMARY
+          fi

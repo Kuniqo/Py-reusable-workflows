@@ -1,0 +1,419 @@
+name: Pull Request Checks (Reusable - Universal)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      coverage-min:
+        required: false
+        type: number
+        default: 70
+      fail-on-lint-errors:
+        required: false
+        type: boolean
+        default: true
+        description: "Fallar si hay errores de lint (PRs suelen ser más estrictos)"
+      fail-on-security-audit:
+        required: false
+        type: boolean
+        default: false
+      build-docker-image:
+        required: false
+        type: boolean
+        default: false
+        description: "Construir imagen Docker después de checks exitosos (solo Python)"
+      docker-registry:
+        required: false
+        type: string
+        default: "ghcr.io"
+        description: "Registro de Docker (ghcr.io, docker.io, etc.)"
+      docker-image-name:
+        required: false
+        type: string
+        description: "Nombre de la imagen Docker (ej: org/app-name)"
+      docker-build-args:
+        required: false
+        type: string
+        default: ""
+        description: "Build args para Docker (formato: KEY1=val1,KEY2=val2 o multilinea KEY=val)"
+      # Variables públicas como inputs (el caller las pasa desde vars)
+      BASE_URL:
+        required: false
+        type: string
+        description: "Base URL for the application (build time)"
+      NEXTAUTH_URL:
+        required: false
+        type: string
+        description: "NextAuth base URL"
+      NEXT_PUBLIC_BASE_URL:
+        required: false
+        type: string
+        description: "Public base URL for Next.js"
+      SMTP_HOST:
+        required: false
+        type: string
+        description: "SMTP server host"
+      SMTP_PORT:
+        required: false
+        type: string
+        description: "SMTP server port"
+      SMTP_USER:
+        required: false
+        type: string
+        description: "SMTP username"
+    secrets:
+      DATABASE_URL:
+        required: false
+        description: "Database connection URL"
+      NEXTAUTH_SECRET:
+        required: false
+        description: "NextAuth secret key"
+      AUTH_SECRET:
+        required: false
+        description: "Auth secret key"
+      SMTP_PASS:
+        required: false
+        description: "SMTP password"
+
+permissions:
+  contents: read
+  pull-requests: write
+  packages: write  # Necesario para Docker builds (Python)
+
+jobs:
+  # ==============================
+  #  JOB 1: DETECCIÓN DE LENGUAJE
+  # ==============================
+  detect-language:
+    name: Detectar Lenguaje
+    runs-on: ubuntu-latest
+    outputs:
+      language: ${{ steps.detect.outputs.lang }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        run: |
+          if [ -f "pyproject.toml" ]; then
+            echo "lang=python" >> $GITHUB_OUTPUT
+            echo "🐍 Proyecto Python detectado"
+          elif [ -f "package.json" ]; then
+            if grep -q '"typescript"' package.json || [ -f "tsconfig.json" ]; then
+              echo "lang=typescript" >> $GITHUB_OUTPUT
+              echo "📘 Proyecto TypeScript detectado"
+            else
+              echo "lang=javascript" >> $GITHUB_OUTPUT
+              echo "📗 Proyecto JavaScript detectado"
+            fi
+          else
+            echo "lang=unknown" >> $GITHUB_OUTPUT
+            echo "❓ Lenguaje no detectado"
+          fi
+
+  # ==============================
+  #  JOB 2: LINT (Python o JS/TS)
+  # ==============================
+  lint:
+    name: Lint Checks
+    needs: detect-language
+    if: needs.detect-language.outputs.language != 'unknown'
+    uses: ./.github/workflows/lint.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      fail-on-lint-errors: ${{ inputs.fail-on-lint-errors }}
+      fail-on-security-audit: ${{ inputs.fail-on-security-audit }}
+
+  # ==============================
+  #  JOB 3: BUILD (UNIVERSAL)
+  # ==============================
+  build:
+    name: Build Packages
+    needs: [detect-language, lint]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.detect-language.outputs.language != 'unknown' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'failure')
+    uses: ./.github/workflows/build.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      # Variables públicas como inputs (vienen de inputs de pr_checks)
+      BASE_URL: ${{ inputs.BASE_URL }}
+      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
+      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
+      SMTP_HOST: ${{ inputs.SMTP_HOST }}
+      SMTP_PORT: ${{ inputs.SMTP_PORT }}
+      SMTP_USER: ${{ inputs.SMTP_USER }}
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+  # ==============================
+  #  JOB 4: TESTS & COVERAGE (UNIVERSAL)
+  # ==============================
+  tests:
+    name: Tests & Coverage
+    needs: [detect-language, lint, build]
+    if: |
+      always() &&
+      needs.detect-language.outputs.language != 'unknown' &&
+      !cancelled() &&
+      (needs.lint.result == 'success' || needs.lint.result == 'failure') &&
+      needs.build.result == 'success'
+    uses: ./.github/workflows/test.yml
+    with:
+      language: ${{ needs.detect-language.outputs.language }}
+      python-version: ${{ inputs.python-version }}
+      node-version: ${{ inputs.node-version }}
+      coverage-min: ${{ inputs.coverage-min }}
+      skip-tests: false
+      # Variables públicas como inputs (vienen de inputs de pr_checks)
+      BASE_URL: ${{ inputs.BASE_URL }}
+      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
+      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
+      SMTP_HOST: ${{ inputs.SMTP_HOST }}
+      SMTP_PORT: ${{ inputs.SMTP_PORT }}
+      SMTP_USER: ${{ inputs.SMTP_USER }}
+    secrets:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+  # ==============================
+  #  JOB 5: BUILD DOCKER IMAGE (Python)
+  # ==============================
+  build-docker-python:
+    name: Build Docker Image (Python)
+    needs: [detect-language, lint, tests]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.detect-language.outputs.language == 'python' &&
+      needs.tests.result == 'success' &&
+      inputs.build-docker-image == true &&
+      needs.tests.outputs.coverage_ok == 'true' &&
+      needs.tests.outputs.has_critical_errors == 'false'
+    uses: ./.github/workflows/docker-build-python.yml
+    with:
+      python-version: ${{ inputs.python-version }}
+      docker-registry: ${{ inputs.docker-registry }}
+      docker-image-name: ${{ inputs.docker-image-name }}
+      build-args: ${{ inputs.docker-build-args }}
+    secrets: inherit
+
+  # ==============================
+  #  JOB 6: BUILD DOCKER IMAGE (JavaScript/TypeScript)
+  # ==============================
+  build-docker-js-ts:
+    name: Build Docker Image (JS/TS)
+    needs: [detect-language, lint, tests]
+    if: |
+      always() &&
+      !cancelled() &&
+      (needs.detect-language.outputs.language == 'javascript' ||
+       needs.detect-language.outputs.language == 'typescript') &&
+      needs.tests.result == 'success' &&
+      inputs.build-docker-image == true
+    uses: ./.github/workflows/docker-build-js-ts.yml
+    with:
+      node-version: ${{ inputs.node-version }}
+      docker-registry: ${{ inputs.docker-registry }}
+      docker-image-name: ${{ inputs.docker-image-name }}
+      build-args: ${{ inputs.docker-build-args }}
+      push-image: true
+    secrets: inherit
+
+  # ==============================
+  #  JOB 7: LENGUAJE DESCONOCIDO
+  # ==============================
+  unknown-language:
+    name: Lenguaje No Soportado
+    runs-on: ubuntu-latest
+    needs: detect-language
+    if: needs.detect-language.outputs.language == 'unknown'
+
+    steps:
+      - name: Warning
+        run: |
+          echo "::warning::No se detectó lenguaje soportado (ni pyproject.toml ni package.json)"
+          echo "❓ Este proyecto no tiene configuración Python ni JavaScript/TypeScript"
+
+  # ==============================
+  #  JOB 8: RESUMEN FINAL
+  # ==============================
+  pr-summary:
+    name: PR Summary
+    runs-on: ubuntu-latest
+    needs: [detect-language, lint, build, tests, build-docker-python, build-docker-js-ts, unknown-language]
+    if: always()
+
+    steps:
+      - name: Generate PR Summary
+        run: |
+          echo "## 📋 Resumen del Pull Request" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          LANGUAGE="${{ needs.detect-language.outputs.language }}"
+          echo "**Lenguaje detectado:** $LANGUAGE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$LANGUAGE" == "python" ]; then
+            echo "### 🐍 Python Checks" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Lint
+            LINT_STATUS="${{ needs.lint.result }}"
+            if [ "$LINT_STATUS" == "success" ]; then
+              echo "- ✅ **Lint (Ruff)**: Pasó" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ❌ **Lint (Ruff)**: Falló" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Build
+            BUILD_STATUS="${{ needs.build.result }}"
+            if [ "$BUILD_STATUS" == "success" ]; then
+              echo "- ✅ **Build**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            elif [ "$BUILD_STATUS" == "failure" ]; then
+              echo "- ❌ **Build**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Build**: $BUILD_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Tests
+            TESTS_STATUS="${{ needs.tests.result }}"
+            if [ "$TESTS_STATUS" == "success" ]; then
+              echo "- ✅ **Tests & Coverage**: Pasó (>= ${{ inputs.coverage-min }}%)" >> $GITHUB_STEP_SUMMARY
+            elif [ "$TESTS_STATUS" == "failure" ]; then
+              echo "- ❌ **Tests & Coverage**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Tests & Coverage**: $TESTS_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Docker Build
+            DOCKER_STATUS="${{ needs.build-docker-python.result }}"
+            if [ "${{ inputs.build-docker-image }}" == "true" ]; then
+              if [ "$DOCKER_STATUS" == "success" ]; then
+                echo "- ✅ **Docker Build**: Imagen construida y pusheada" >> $GITHUB_STEP_SUMMARY
+              elif [ "$DOCKER_STATUS" == "failure" ]; then
+                echo "- ❌ **Docker Build**: Falló" >> $GITHUB_STEP_SUMMARY
+              elif [ "$DOCKER_STATUS" == "skipped" ]; then
+                echo "- ⏭️ **Docker Build**: Saltado (tests no pasaron o coverage bajo)" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+
+          elif [ "$LANGUAGE" == "javascript" ] || [ "$LANGUAGE" == "typescript" ]; then
+            echo "### ⚙️ JavaScript/TypeScript Checks" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Lint & Quality Checks
+            LINT_STATUS="${{ needs.lint.result }}"
+            LINT_OUTCOME="${{ needs.lint.outputs.lint_outcome }}"
+            TYPECHECK_OUTCOME="${{ needs.lint.outputs.typecheck_outcome }}"
+            AUDIT_OUTCOME="${{ needs.lint.outputs.audit_outcome }}"
+
+            echo "#### 🔍 Calidad de Código" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # ESLint
+            if [ "$LINT_OUTCOME" == "success" ]; then
+              echo "- ✅ **ESLint**: Sin errores" >> $GITHUB_STEP_SUMMARY
+            elif [ "$LINT_OUTCOME" == "failure" ]; then
+              if [ "${{ inputs.fail-on-lint-errors }}" == "true" ]; then
+                echo "- ❌ **ESLint**: Errores críticos encontrados (bloqueante)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ⚠️ **ESLint**: Errores encontrados (no-bloqueante)" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ⏭️ **ESLint**: Saltado" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # TypeCheck
+            if [ "$TYPECHECK_OUTCOME" == "success" ]; then
+              echo "- ✅ **TypeCheck**: Sin errores de tipo" >> $GITHUB_STEP_SUMMARY
+            elif [ "$TYPECHECK_OUTCOME" == "failure" ]; then
+              if [ "${{ inputs.fail-on-lint-errors }}" == "true" ]; then
+                echo "- ❌ **TypeCheck**: Errores de tipo críticos (bloqueante)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ⚠️ **TypeCheck**: Errores de tipo encontrados (no-bloqueante)" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ⏭️ **TypeCheck**: Saltado (no TypeScript)" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Security Audit
+            if [ "$AUDIT_OUTCOME" == "success" ]; then
+              echo "- ✅ **Security Audit**: Sin vulnerabilidades" >> $GITHUB_STEP_SUMMARY
+            elif [ "$AUDIT_OUTCOME" == "failure" ]; then
+              if [ "${{ inputs.fail-on-security-audit }}" == "true" ]; then
+                echo "- ❌ **Security Audit**: Vulnerabilidades críticas (bloqueante)" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "- ⚠️ **Security Audit**: Vulnerabilidades encontradas (no-bloqueante)" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "- ⏭️ **Security Audit**: Saltado" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### 🏗️ Build & Tests" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Build
+            BUILD_STATUS="${{ needs.build.result }}"
+            if [ "$BUILD_STATUS" == "success" ]; then
+              echo "- ✅ **Build**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            elif [ "$BUILD_STATUS" == "failure" ]; then
+              echo "- ❌ **Build**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Build**: $BUILD_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Tests
+            TESTS_STATUS="${{ needs.tests.result }}"
+
+            if [ "$TESTS_STATUS" == "success" ]; then
+              echo "- ✅ **Tests & Coverage**: Pasó" >> $GITHUB_STEP_SUMMARY
+            elif [ "$TESTS_STATUS" == "failure" ]; then
+              echo "- ❌ **Tests & Coverage**: Falló" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ⏭️ **Tests & Coverage**: $TESTS_STATUS" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Docker Build
+            DOCKER_STATUS="${{ needs.build-docker-js-ts.result }}"
+            if [ "${{ inputs.build-docker-image }}" == "true" ]; then
+              if [ "$DOCKER_STATUS" == "success" ]; then
+                echo "- ✅ **Docker Build**: Imagen construida y pusheada" >> $GITHUB_STEP_SUMMARY
+              elif [ "$DOCKER_STATUS" == "failure" ]; then
+                echo "- ❌ **Docker Build**: Falló" >> $GITHUB_STEP_SUMMARY
+              elif [ "$DOCKER_STATUS" == "skipped" ]; then
+                echo "- ⏭️ **Docker Build**: Saltado (tests no pasaron)" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+
+          elif [ "$LANGUAGE" == "unknown" ]; then
+            echo "### ❓ Lenguaje Desconocido" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- ⚠️ No se detectó lenguaje soportado" >> $GITHUB_STEP_SUMMARY
+            echo "- 💡 Asegúrate de tener \`pyproject.toml\` (Python) o \`package.json\` (JavaScript/TypeScript)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "💡 **Tip**: Descarga los reportes de coverage desde la sección de Artifacts" >> $GITHUB_STEP_SUMMARY

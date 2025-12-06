@@ -1,0 +1,285 @@
+name: Setup Azure Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      # ==============================
+      # GitHub Environment
+      # ==============================
+      environment:
+        required: false
+        type: string
+        default: "staging"
+        description: "GitHub Environment (staging, production) para obtener AZURE_RESOURCE_GROUP, AZURE_APP_PLAN, AZURE_LOCATION, AZURE_SKU"
+
+      # ==============================
+      # Overrides (opcionales)
+      # ==============================
+      resource-group-name:
+        required: false
+        type: string
+        description: "Override para nombre del Resource Group (default: vars.AZURE_RESOURCE_GROUP)"
+      app-service-plan-name:
+        required: false
+        type: string
+        description: "Override para nombre del App Service Plan (default: vars.AZURE_APP_PLAN)"
+      azure-location:
+        required: false
+        type: string
+        description: "Override para región de Azure (default: vars.AZURE_LOCATION)"
+      azure-sku:
+        required: false
+        type: string
+        description: "Override para SKU del App Service Plan (default: vars.AZURE_SKU)"
+
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+        description: "Azure Service Principal credentials (JSON)"
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+        description: "Azure Subscription ID"
+
+    outputs:
+      resource-group:
+        description: "Nombre del Resource Group"
+        value: ${{ jobs.setup-base-infrastructure.outputs.resource_group }}
+      app-service-plan:
+        description: "Nombre del App Service Plan"
+        value: ${{ jobs.setup-base-infrastructure.outputs.app_service_plan }}
+      azure-location:
+        description: "Región de Azure"
+        value: ${{ jobs.setup-base-infrastructure.outputs.azure_location }}
+      azure-sku:
+        description: "SKU del App Service Plan"
+        value: ${{ jobs.setup-base-infrastructure.outputs.azure_sku }}
+
+permissions:
+  contents: read
+
+jobs:
+  setup-base-infrastructure:
+    name: 🏗️ Setup Base Infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      resource_group: ${{ steps.config.outputs.resource_group }}
+      app_service_plan: ${{ steps.config.outputs.app_service_plan }}
+      azure_location: ${{ steps.config.outputs.azure_location }}
+      azure_sku: ${{ steps.config.outputs.azure_sku }}
+
+    steps:
+      - name: Configure resource names
+        id: config
+        run: |
+          # Resource Group (input > vars)
+          if [ -n "${{ inputs.resource-group-name }}" ]; then
+            RESOURCE_GROUP="${{ inputs.resource-group-name }}"
+          else
+            RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          fi
+
+          # App Service Plan (input > vars)
+          if [ -n "${{ inputs.app-service-plan-name }}" ]; then
+            APP_SERVICE_PLAN="${{ inputs.app-service-plan-name }}"
+          else
+            APP_SERVICE_PLAN="${{ vars.AZURE_APP_PLAN }}"
+          fi
+
+          # Azure Location (input > vars > default)
+          if [ -n "${{ inputs.azure-location }}" ]; then
+            AZURE_LOCATION="${{ inputs.azure-location }}"
+          elif [ -n "${{ vars.AZURE_LOCATION }}" ]; then
+            AZURE_LOCATION="${{ vars.AZURE_LOCATION }}"
+          else
+            AZURE_LOCATION="eastus"
+          fi
+
+          # Azure SKU (input > vars > default)
+          if [ -n "${{ inputs.azure-sku }}" ]; then
+            AZURE_SKU="${{ inputs.azure-sku }}"
+          elif [ -n "${{ vars.AZURE_SKU }}" ]; then
+            AZURE_SKU="${{ vars.AZURE_SKU }}"
+          else
+            AZURE_SKU="B1"
+          fi
+
+          echo "resource_group=${RESOURCE_GROUP}" >> $GITHUB_OUTPUT
+          echo "app_service_plan=${APP_SERVICE_PLAN}" >> $GITHUB_OUTPUT
+          echo "azure_location=${AZURE_LOCATION}" >> $GITHUB_OUTPUT
+          echo "azure_sku=${AZURE_SKU}" >> $GITHUB_OUTPUT
+
+          echo "📋 Configuración de infraestructura base:"
+          echo "  Resource Group: ${RESOURCE_GROUP}"
+          echo "  App Service Plan: ${APP_SERVICE_PLAN}"
+          echo "  Location: ${AZURE_LOCATION}"
+          echo "  SKU: ${AZURE_SKU}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create or verify Resource Group
+        env:
+          RESOURCE_GROUP: ${{ steps.config.outputs.resource_group }}
+          LOCATION: ${{ steps.config.outputs.azure_location }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          echo "🔍 Verificando Resource Group '${RESOURCE_GROUP}'..."
+
+          if az group show --name "${RESOURCE_GROUP}" --subscription "${SUBSCRIPTION_ID}" &>/dev/null; then
+            RG_LOCATION=$(az group show \
+              --name "${RESOURCE_GROUP}" \
+              --subscription "${SUBSCRIPTION_ID}" \
+              --query location -o tsv)
+
+            echo "✅ Resource Group ya existe"
+            echo "📍 Ubicación: ${RG_LOCATION}"
+
+            # Verificar si la ubicación coincide
+            RG_NORMALIZED=$(echo "$RG_LOCATION" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+            EXPECTED_NORMALIZED=$(echo "$LOCATION" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+
+            if [ "$RG_NORMALIZED" != "$EXPECTED_NORMALIZED" ]; then
+              echo ""
+              echo "⚠️  NOTA: Resource Group está en región diferente"
+              echo "   Resource Group: ${RG_LOCATION}"
+              echo "   Esperado: ${LOCATION}"
+              echo "   (Los recursos se crearán en ${LOCATION})"
+            fi
+          else
+            echo "📦 Creando Resource Group '${RESOURCE_GROUP}' en ${LOCATION}..."
+            az group create \
+              --name "${RESOURCE_GROUP}" \
+              --location "${LOCATION}" \
+              --subscription "${SUBSCRIPTION_ID}" \
+              --tags environment=${ENVIRONMENT} managed-by=github-actions
+
+            echo "✅ Resource Group creado"
+          fi
+
+      - name: Create or verify App Service Plan
+        env:
+          RESOURCE_GROUP: ${{ steps.config.outputs.resource_group }}
+          APP_SERVICE_PLAN: ${{ steps.config.outputs.app_service_plan }}
+          LOCATION: ${{ steps.config.outputs.azure_location }}
+          SKU: ${{ steps.config.outputs.azure_sku }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          echo "🔍 Verificando App Service Plan '${APP_SERVICE_PLAN}'..."
+
+          if az appservice plan show \
+            --name "${APP_SERVICE_PLAN}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${SUBSCRIPTION_ID}" &>/dev/null; then
+
+            CURRENT_LOCATION=$(az appservice plan show \
+              --name "${APP_SERVICE_PLAN}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${SUBSCRIPTION_ID}" \
+              --query location -o tsv)
+
+            CURRENT_SKU=$(az appservice plan show \
+              --name "${APP_SERVICE_PLAN}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${SUBSCRIPTION_ID}" \
+              --query sku.name -o tsv)
+
+            echo "✅ App Service Plan ya existe"
+            echo "📍 Ubicación: ${CURRENT_LOCATION}"
+            echo "💰 SKU: ${CURRENT_SKU}"
+
+            # Verificar región
+            CURRENT_NORMALIZED=$(echo "$CURRENT_LOCATION" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+            EXPECTED_NORMALIZED=$(echo "$LOCATION" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+
+            if [ "$CURRENT_NORMALIZED" != "$EXPECTED_NORMALIZED" ]; then
+              echo ""
+              echo "⚠️  WARNING: App Service Plan está en región diferente"
+              echo "   Actual: ${CURRENT_LOCATION}"
+              echo "   Esperado: ${LOCATION}"
+              echo ""
+              echo "🗑️  Eliminando plan para recrearlo en región correcta..."
+
+              az appservice plan delete \
+                --name "${APP_SERVICE_PLAN}" \
+                --resource-group "${RESOURCE_GROUP}" \
+                --subscription "${SUBSCRIPTION_ID}" \
+                --yes
+
+              echo "📦 Recreando App Service Plan en ${LOCATION}..."
+              if ! az appservice plan create \
+                --resource-group "${RESOURCE_GROUP}" \
+                --name "${APP_SERVICE_PLAN}" \
+                --is-linux \
+                --sku "${SKU}" \
+                --location "${LOCATION}" \
+                --subscription "${SUBSCRIPTION_ID}" \
+                --tags environment=${ENVIRONMENT} managed-by=github-actions; then
+                echo "❌ ERROR: No se pudo crear el App Service Plan"
+                exit 1
+              fi
+              echo "✅ App Service Plan recreado"
+            fi
+          else
+            echo "📦 Creando App Service Plan '${APP_SERVICE_PLAN}' con SKU ${SKU}..."
+
+            if ! az appservice plan create \
+              --resource-group "${RESOURCE_GROUP}" \
+              --name "${APP_SERVICE_PLAN}" \
+              --is-linux \
+              --sku "${SKU}" \
+              --location "${LOCATION}" \
+              --subscription "${SUBSCRIPTION_ID}" \
+              --tags environment=${ENVIRONMENT} managed-by=github-actions; then
+
+              echo "❌ ERROR: No se pudo crear el App Service Plan"
+              echo ""
+              echo "💡 Posibles soluciones:"
+              echo "   1. Verificar cuota para SKU ${SKU} en ${LOCATION}"
+              echo "   2. Cambiar AZURE_SKU (F1, S1, P1v2)"
+              echo "   3. Usar un App Service Plan existente"
+              exit 1
+            fi
+
+            echo "✅ App Service Plan creado"
+          fi
+
+      - name: Verify infrastructure
+        env:
+          RESOURCE_GROUP: ${{ steps.config.outputs.resource_group }}
+          APP_SERVICE_PLAN: ${{ steps.config.outputs.app_service_plan }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          echo "🔍 Verificación final..."
+
+          if ! az group show --name "${RESOURCE_GROUP}" --subscription "${SUBSCRIPTION_ID}" &>/dev/null; then
+            echo "❌ ERROR: Resource Group no existe"
+            exit 1
+          fi
+
+          if ! az appservice plan show \
+            --name "${APP_SERVICE_PLAN}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${SUBSCRIPTION_ID}" &>/dev/null; then
+            echo "❌ ERROR: App Service Plan no existe"
+            exit 1
+          fi
+
+          echo "✅ Infraestructura verificada"
+
+      - name: Generate summary
+        run: |
+          echo "## 🏗️ Base Infrastructure Ready" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Name |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | \`${{ steps.config.outputs.resource_group }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| App Service Plan | \`${{ steps.config.outputs.app_service_plan }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Location | ${{ steps.config.outputs.azure_location }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SKU | ${{ steps.config.outputs.azure_sku }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,192 @@
+name: Docker Build Python (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+        default: "3.12"
+      docker-registry:
+        required: false
+        type: string
+        default: "ghcr.io"
+        description: "Registro de Docker (ghcr.io, docker.io, etc.)"
+      docker-image-name:
+        required: true
+        type: string
+        description: "Nombre completo de la imagen (ej: org/app-name)"
+      dockerfile-path:
+        required: false
+        type: string
+        default: "./Dockerfile"
+        description: "Ruta al Dockerfile"
+      build-context:
+        required: false
+        type: string
+        default: "."
+        description: "Contexto de build"
+      platforms:
+        required: false
+        type: string
+        default: "linux/amd64"
+        description: "Plataformas a construir (separadas por coma)"
+      push-image:
+        required: false
+        type: boolean
+        default: true
+        description: "Push de la imagen al registry"
+      build-args:
+        required: false
+        type: string
+        default: ""
+        description: "Build args (formato: KEY1=val1,KEY2=val2)"
+    secrets:
+      CR_PAT:
+        required: false
+        description: "Personal Access Token para GHCR (usa secrets.GITHUB_TOKEN si no está disponible)"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.docker-registry }}
+          username: ${{ vars.GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.CR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.docker-registry }}/${{ inputs.docker-image-name }}
+          tags: |
+            # Branch name
+            type=ref,event=branch
+            # PR number
+            type=ref,event=pr
+            # Tag name (for semantic versioning)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # SHA
+            type=sha,prefix={{branch}}-
+            # Latest (only for default branch)
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Parse build args
+        id: build-args
+        run: |
+          BUILD_ARGS="${{ inputs.build-args }}"
+          if [ -n "$BUILD_ARGS" ]; then
+            echo "args<<EOF" >> $GITHUB_OUTPUT
+            echo "$BUILD_ARGS" | tr ',' '\n' >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        id: docker-build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.build-context }}
+          file: ${{ inputs.dockerfile-path }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push-image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.build-args.outputs.args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        if: inputs.push-image == true
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        if: inputs.push-image == true && always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Generate Build Summary
+        if: always()
+        run: |
+          echo "## 🐳 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extraer información del registry y nombre
+          REGISTRY="${{ inputs.docker-registry }}"
+          IMAGE_NAME="${{ inputs.docker-image-name }}"
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+
+          # Generar URL del package según el registry
+          if [[ "$REGISTRY" == "ghcr.io" ]]; then
+            # Para GHCR, extraer org/repo del image name
+            ORG=$(echo "$IMAGE_NAME" | cut -d'/' -f1)
+            PACKAGE=$(echo "$IMAGE_NAME" | cut -d'/' -f2)
+            PACKAGE_URL="https://github.com/${ORG}/packages/container/package/${PACKAGE}"
+          elif [[ "$REGISTRY" == "docker.io" ]]; then
+            PACKAGE_URL="https://hub.docker.com/r/${IMAGE_NAME}"
+          else
+            PACKAGE_URL="${REGISTRY}/${IMAGE_NAME}"
+          fi
+
+          if [ "${{ inputs.push-image }}" == "true" ]; then
+            echo "✅ **Imagen construida y pusheada exitosamente**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ **Imagen construida pero no pusheada** (push-image=false)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📦 Package Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: \`${REGISTRY}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${IMAGE_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package URL**: ${PACKAGE_URL}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Python Version**: \`${{ inputs.python-version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: \`${{ inputs.platforms }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 🏷️ Tags Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.push-image }}" == "true" ]; then
+            echo "### 🚀 Pull Command" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${FIRST_TAG}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            echo "### 📊 Image Digest" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`${{ steps.docker-build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ **Imagen no pusheada al registry**" >> $GITHUB_STEP_SUMMARY
+          fi

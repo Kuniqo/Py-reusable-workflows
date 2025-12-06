@@ -1,0 +1,1022 @@
+name: Setup App Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      # ==============================
+      # Configuración de la Aplicación
+      # ==============================
+      app-name:
+        required: true
+        type: string
+        description: "Nombre base de la app (ej: fravano)"
+      app-name-suffix:
+        required: false
+        type: string
+        default: ""
+        description: "Sufijo para el nombre (ej: pr-123 para preview, vacío para producción)"
+
+      # ==============================
+      # GitHub Environment
+      # ==============================
+      environment:
+        required: false
+        type: string
+        default: "staging"
+        description: "GitHub Environment (staging, production) para obtener AZURE_RESOURCE_GROUP, AZURE_APP_PLAN, etc."
+
+      # ==============================
+      # Configuración de Docker/Container
+      # ==============================
+      docker-image-name:
+        required: true
+        type: string
+        description: "Docker image name to deploy (ej: ghcr.io/org/app:tag)"
+      container-port:
+        required: false
+        type: string
+        default: "3000"
+        description: "Puerto donde el contenedor escucha"
+
+      # ==============================
+      # Configuración de Base de Datos
+      # ==============================
+      create-database:
+        required: false
+        type: boolean
+        default: true
+        description: "Crear base de datos PostgreSQL/MySQL"
+      database-type:
+        required: false
+        type: string
+        default: "postgresql"
+        description: "Tipo de BD (postgresql o mysql)"
+      database-admin-username:
+        required: false
+        type: string
+        default: "dbadmin"
+        description: "Usuario admin de la BD"
+      database-name:
+        required: false
+        type: string
+        default: "appdb"
+        description: "Nombre de la base de datos"
+      database-sku:
+        required: false
+        type: string
+        default: "Standard_B1ms"
+        description: "SKU del servidor de BD"
+      database-tier:
+        required: false
+        type: string
+        default: "Burstable"
+        description: "Tier del servidor (Burstable, GeneralPurpose, MemoryOptimized)"
+      database-version:
+        required: false
+        type: string
+        default: "16"
+        description: "Versión de BD (PostgreSQL: 12-16, MySQL: 5.7, 8.0.21)"
+      database-storage-size:
+        required: false
+        type: string
+        default: "32"
+        description: "Tamaño del storage en GB"
+
+      # ==============================
+      # Configuración de Storage Account
+      # ==============================
+      create-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Crear Azure Storage Account para archivos/fotos"
+      storage-account-name:
+        required: false
+        type: string
+        default: ""
+        description: "Nombre del Storage Account (override). Si vacío, se genera automáticamente"
+      storage-container-name:
+        required: false
+        type: string
+        default: "uploads"
+        description: "Nombre del container de blob storage (separar múltiples con coma: 'fravano,img-public')"
+      storage-sku:
+        required: false
+        type: string
+        default: "Standard_LRS"
+        description: "SKU del Storage Account (Standard_LRS, Standard_GRS, Premium_LRS)"
+      storage-access-tier:
+        required: false
+        type: string
+        default: "Hot"
+        description: "Tier de acceso (Hot, Cool, Archive)"
+      storage-public-access:
+        required: false
+        type: boolean
+        default: false
+        description: "Permitir acceso público a blobs (false = privado)"
+
+      # ==============================
+      # Sincronización desde Storage origen
+      # ==============================
+      sync-from-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Sincronizar datos desde un Storage Account existente"
+      source-storage-account:
+        required: false
+        type: string
+        default: ""
+        description: "Nombre del Storage Account origen (ej: bsmdmgpublic)"
+      source-resource-group:
+        required: false
+        type: string
+        default: ""
+        description: "Resource Group del Storage origen (ej: rsgmdmgbs)"
+      source-containers:
+        required: false
+        type: string
+        default: ""
+        description: "Containers a sincronizar del origen (separar con coma: 'fravano,img-public')"
+
+      # ==============================
+      # Opciones de Migración
+      # ==============================
+      run-migrations:
+        required: false
+        type: boolean
+        default: true
+        description: "Ejecutar migraciones de Prisma"
+      run-seed:
+        required: false
+        type: boolean
+        default: false
+        description: "Ejecutar seed de Prisma"
+
+      # ==============================
+      # Variables de la App
+      # ==============================
+      app-settings:
+        required: false
+        type: string
+        description: "JSON con variables de entorno adicionales"
+
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+        description: "Azure Service Principal credentials (JSON)"
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+        description: "Azure Subscription ID"
+      CR_PAT:
+        required: true
+        description: "Container Registry PAT"
+      DATABASE_ADMIN_PASSWORD:
+        required: false
+        description: "Password del admin de BD"
+      NEXTAUTH_SECRET:
+        required: false
+      AUTH_SECRET:
+        required: false
+      SMTP_PASS:
+        required: false
+      JWT_SECRET:
+        required: false
+
+    outputs:
+      webapp-name:
+        description: "Nombre de la Web App creada"
+        value: ${{ jobs.setup-app-resources.outputs.webapp_name }}
+      webapp-url:
+        description: "URL de la Web App"
+        value: ${{ jobs.setup-app-resources.outputs.webapp_url }}
+      database-server-name:
+        description: "Nombre del servidor de BD"
+        value: ${{ jobs.setup-app-resources.outputs.database_server_name }}
+      database-host:
+        description: "Host de la BD"
+        value: ${{ jobs.setup-app-resources.outputs.database_host }}
+      storage-account-name:
+        description: "Nombre del Storage Account"
+        value: ${{ jobs.setup-app-resources.outputs.storage_account_name }}
+      storage-connection-string:
+        description: "Connection string del Storage"
+        value: ${{ jobs.setup-app-resources.outputs.storage_connection_string }}
+      storage-blob-endpoint:
+        description: "Endpoint del Blob Storage"
+        value: ${{ jobs.setup-app-resources.outputs.storage_blob_endpoint }}
+
+permissions:
+  contents: read
+
+jobs:
+  setup-app-resources:
+    name: 🚀 Setup App Infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      webapp_name: ${{ steps.names.outputs.webapp_name }}
+      webapp_url: ${{ steps.webapp-info.outputs.url }}
+      database_server_name: ${{ steps.names.outputs.database_server_name }}
+      database_host: ${{ steps.db-info.outputs.host }}
+      storage_account_name: ${{ steps.names.outputs.storage_account_name }}
+      storage_connection_string: ${{ steps.storage-info.outputs.connection_string }}
+      storage_blob_endpoint: ${{ steps.storage-info.outputs.blob_endpoint }}
+
+    steps:
+      - name: Generate resource names
+        id: names
+        run: |
+          APP_NAME="${{ inputs.app-name }}"
+          SUFFIX="${{ inputs.app-name-suffix }}"
+          DB_TYPE="${{ inputs.database-type }}"
+
+          # Nombre de Web App
+          if [ -n "$SUFFIX" ]; then
+            WEBAPP_NAME="${APP_NAME}-${SUFFIX}"
+          else
+            WEBAPP_NAME="${APP_NAME}"
+          fi
+
+          # Nombre del servidor de BD
+          if [ "${DB_TYPE}" == "postgresql" ]; then
+            if [ -n "$SUFFIX" ]; then
+              DB_SERVER_NAME="${APP_NAME}-pg-${SUFFIX}"
+            else
+              DB_SERVER_NAME="${APP_NAME}-prod-pg"
+            fi
+          else
+            if [ -n "$SUFFIX" ]; then
+              DB_SERVER_NAME="${APP_NAME}-mysql-${SUFFIX}"
+            else
+              DB_SERVER_NAME="${APP_NAME}-prod-mysql"
+            fi
+          fi
+
+          # Nombre del Storage Account (solo alfanumérico, 3-24 chars)
+          STORAGE_OVERRIDE="${{ inputs.storage-account-name }}"
+          if [ -n "$STORAGE_OVERRIDE" ]; then
+            # Usar el nombre proporcionado (asegurar que sea válido)
+            STORAGE_ACCOUNT_NAME=$(echo "$STORAGE_OVERRIDE" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+            if [ ${#STORAGE_ACCOUNT_NAME} -gt 24 ]; then
+              STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:0:24}"
+            fi
+          else
+            # Generar automáticamente: reemplazar guiones y truncar
+            STORAGE_BASE=$(echo "${APP_NAME}${SUFFIX}" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+            # Agregar sufijo 'st' para storage y truncar a 24 chars
+            STORAGE_ACCOUNT_NAME="${STORAGE_BASE}st"
+            if [ ${#STORAGE_ACCOUNT_NAME} -gt 24 ]; then
+              STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:0:24}"
+            fi
+          fi
+
+          echo "webapp_name=${WEBAPP_NAME}" >> $GITHUB_OUTPUT
+          echo "database_server_name=${DB_SERVER_NAME}" >> $GITHUB_OUTPUT
+          echo "storage_account_name=${STORAGE_ACCOUNT_NAME}" >> $GITHUB_OUTPUT
+
+          echo "📋 Nombres de recursos generados:"
+          echo "  Web App: ${WEBAPP_NAME}"
+          echo "  Database Server: ${DB_SERVER_NAME}"
+          echo "  Storage Account: ${STORAGE_ACCOUNT_NAME}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ==============================
+      # DATABASE SERVER
+      # ==============================
+      - name: Diagnose Database Availability
+        if: inputs.create-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_COMMAND="postgres"
+          else
+            DB_COMMAND="mysql"
+          fi
+
+          echo "🔍 DIAGNÓSTICO DE DISPONIBILIDAD ${DB_TYPE^^}"
+          echo "======================================"
+          echo ""
+          echo "📍 Resource Group: ${{ vars.AZURE_RESOURCE_GROUP }}"
+          echo "📍 Región: ${{ vars.AZURE_LOCATION }}"
+          echo "🏷️  SKU: ${{ inputs.database-sku }}"
+          echo ""
+
+          echo "📋 SKUs disponibles en la región..."
+          az ${DB_COMMAND} flexible-server list-skus \
+            --location "${{ vars.AZURE_LOCATION }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --output table 2>/dev/null | head -20 || echo "⚠️ No se pudo listar SKUs"
+
+          echo ""
+          echo "🔍 Verificando servidor existente..."
+          if az ${DB_COMMAND} flexible-server show \
+            --name "${DB_SERVER_NAME}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+            echo "ℹ️ El servidor '${DB_SERVER_NAME}' YA EXISTE"
+          else
+            echo "✅ El servidor '${DB_SERVER_NAME}' NO existe - se creará"
+          fi
+
+      - name: Create Database Server
+        if: inputs.create-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          LOCATION="${{ vars.AZURE_LOCATION }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_COMMAND="postgres"
+          else
+            DB_COMMAND="mysql"
+          fi
+
+          echo "🔍 Verificando servidor ${DB_TYPE^^}..."
+          if az ${DB_COMMAND} flexible-server show \
+            --name "${DB_SERVER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+            echo "✅ Servidor ${DB_TYPE^^} '${DB_SERVER_NAME}' ya existe"
+          else
+            echo "📦 Creando ${DB_TYPE^^} Flexible Server '${DB_SERVER_NAME}'..."
+            echo "   SKU: ${{ inputs.database-sku }}"
+            echo "   Tier: ${{ inputs.database-tier }}"
+            echo "   Version: ${{ inputs.database-version }}"
+            echo "   Storage: ${{ inputs.database-storage-size }} GB"
+
+            if ! az ${DB_COMMAND} flexible-server create \
+              --name "${DB_SERVER_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --location "${LOCATION}" \
+              --admin-user "${{ inputs.database-admin-username }}" \
+              --admin-password "${{ secrets.DATABASE_ADMIN_PASSWORD }}" \
+              --sku-name "${{ inputs.database-sku }}" \
+              --tier "${{ inputs.database-tier }}" \
+              --version "${{ inputs.database-version }}" \
+              --storage-size "${{ inputs.database-storage-size }}" \
+              --public-access "0.0.0.0-255.255.255.255" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --yes; then
+
+              echo "❌ ERROR: No se pudo crear el servidor ${DB_TYPE^^}"
+              echo ""
+              echo "💡 Posibles causas:"
+              echo "   1. Cuota de subscripción alcanzada"
+              echo "   2. SKU no disponible en la región"
+              echo "   3. Nombre ya existe globalmente"
+              exit 1
+            fi
+
+            echo "✅ Servidor ${DB_TYPE^^} creado"
+          fi
+
+          # Configurar firewall
+          echo "🔧 Configurando firewall..."
+          az ${DB_COMMAND} flexible-server firewall-rule create \
+            --rule-name "AllowAzureServices" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${DB_SERVER_NAME}" \
+            --start-ip-address "0.0.0.0" \
+            --end-ip-address "0.0.0.0" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" || true
+
+      - name: Create Database
+        if: inputs.create-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+          DB_NAME="${{ inputs.database-name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_COMMAND="postgres"
+          else
+            DB_COMMAND="mysql"
+          fi
+
+          echo "🔍 Verificando base de datos '${DB_NAME}'..."
+          if az ${DB_COMMAND} flexible-server db show \
+            --database-name "${DB_NAME}" \
+            --server-name "${DB_SERVER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+            echo "✅ Base de datos ya existe"
+          else
+            echo "📦 Creando base de datos '${DB_NAME}'..."
+            az ${DB_COMMAND} flexible-server db create \
+              --database-name "${DB_NAME}" \
+              --server-name "${DB_SERVER_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+            echo "✅ Base de datos creada"
+          fi
+
+      - name: Get database info
+        id: db-info
+        if: inputs.create-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_HOST="${DB_SERVER_NAME}.postgres.database.azure.com"
+            DB_PORT="5432"
+          else
+            DB_HOST="${DB_SERVER_NAME}.mysql.database.azure.com"
+            DB_PORT="3306"
+          fi
+
+          echo "host=${DB_HOST}" >> $GITHUB_OUTPUT
+          echo "port=${DB_PORT}" >> $GITHUB_OUTPUT
+
+          echo "📍 Database Host: ${DB_HOST}"
+          echo "📍 Database Port: ${DB_PORT}"
+
+      # ==============================
+      # STORAGE ACCOUNT (PRIVADO)
+      # ==============================
+      - name: Create Storage Account
+        if: inputs.create-storage == true
+        run: |
+          STORAGE_ACCOUNT="${{ steps.names.outputs.storage_account_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          LOCATION="${{ vars.AZURE_LOCATION }}"
+          PUBLIC_ACCESS="${{ inputs.storage-public-access }}"
+
+          echo "🔍 Verificando Storage Account '${STORAGE_ACCOUNT}'..."
+          if az storage account show \
+            --name "${STORAGE_ACCOUNT}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+            echo "✅ Storage Account ya existe"
+          else
+            echo "📦 Creando Storage Account '${STORAGE_ACCOUNT}'..."
+            echo "   SKU: ${{ inputs.storage-sku }}"
+            echo "   Access Tier: ${{ inputs.storage-access-tier }}"
+            echo "   Public Access: ${PUBLIC_ACCESS}"
+
+            az storage account create \
+              --name "${STORAGE_ACCOUNT}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --location "${LOCATION}" \
+              --sku "${{ inputs.storage-sku }}" \
+              --access-tier "${{ inputs.storage-access-tier }}" \
+              --kind StorageV2 \
+              --allow-blob-public-access ${PUBLIC_ACCESS} \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+            echo "✅ Storage Account creado"
+          fi
+
+      - name: Create Blob Containers
+        if: inputs.create-storage == true
+        run: |
+          STORAGE_ACCOUNT="${{ steps.names.outputs.storage_account_name }}"
+          CONTAINERS="${{ inputs.storage-container-name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          PUBLIC_ACCESS="${{ inputs.storage-public-access }}"
+
+          # Obtener connection string
+          CONNECTION_STRING=$(az storage account show-connection-string \
+            --name "${STORAGE_ACCOUNT}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --query connectionString -o tsv)
+
+          # Determinar nivel de acceso público
+          if [ "$PUBLIC_ACCESS" == "true" ]; then
+            ACCESS_LEVEL="blob"
+          else
+            ACCESS_LEVEL="off"
+          fi
+
+          # Crear cada container (separados por coma)
+          IFS=',' read -ra CONTAINER_ARRAY <<< "$CONTAINERS"
+          for CONTAINER_NAME in "${CONTAINER_ARRAY[@]}"; do
+            # Limpiar espacios
+            CONTAINER_NAME=$(echo "$CONTAINER_NAME" | xargs)
+
+            echo "🔍 Verificando container '${CONTAINER_NAME}'..."
+            if az storage container show \
+              --name "${CONTAINER_NAME}" \
+              --connection-string "${CONNECTION_STRING}" &>/dev/null; then
+              echo "✅ Container '${CONTAINER_NAME}' ya existe"
+            else
+              echo "📦 Creando container '${CONTAINER_NAME}'..."
+              az storage container create \
+                --name "${CONTAINER_NAME}" \
+                --connection-string "${CONNECTION_STRING}" \
+                --public-access ${ACCESS_LEVEL}
+
+              echo "✅ Container '${CONTAINER_NAME}' creado (acceso: ${ACCESS_LEVEL})"
+            fi
+          done
+
+      - name: Sync data from source Storage Account
+        if: inputs.create-storage == true && inputs.sync-from-storage == true
+        run: |
+          DEST_STORAGE="${{ steps.names.outputs.storage_account_name }}"
+          DEST_RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          SOURCE_STORAGE="${{ inputs.source-storage-account }}"
+          SOURCE_RG="${{ inputs.source-resource-group }}"
+          SOURCE_CONTAINERS="${{ inputs.source-containers }}"
+
+          echo "🔄 Sincronizando datos desde Storage origen..."
+          echo "   Origen: ${SOURCE_STORAGE} (${SOURCE_RG})"
+          echo "   Destino: ${DEST_STORAGE} (${DEST_RG})"
+          echo "   Containers: ${SOURCE_CONTAINERS}"
+          echo ""
+
+          # Obtener SAS token del origen (válido por 1 hora)
+          SOURCE_EXPIRY=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%MZ')
+          SOURCE_SAS=$(az storage account generate-sas \
+            --account-name "${SOURCE_STORAGE}" \
+            --permissions rl \
+            --resource-types sco \
+            --services b \
+            --expiry "${SOURCE_EXPIRY}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -o tsv)
+
+          # Obtener SAS token del destino
+          DEST_EXPIRY=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%MZ')
+          DEST_SAS=$(az storage account generate-sas \
+            --account-name "${DEST_STORAGE}" \
+            --permissions rwdlac \
+            --resource-types sco \
+            --services b \
+            --expiry "${DEST_EXPIRY}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -o tsv)
+
+          # Construir URLs base
+          SOURCE_URL="https://${SOURCE_STORAGE}.blob.core.windows.net"
+          DEST_URL="https://${DEST_STORAGE}.blob.core.windows.net"
+
+          # Sincronizar cada container
+          IFS=',' read -ra CONTAINER_ARRAY <<< "$SOURCE_CONTAINERS"
+          for CONTAINER in "${CONTAINER_ARRAY[@]}"; do
+            # Limpiar espacios
+            CONTAINER=$(echo "$CONTAINER" | xargs)
+
+            echo ""
+            echo "📦 Sincronizando container '${CONTAINER}'..."
+
+            # Usar azcopy para sincronizar
+            azcopy copy \
+              "${SOURCE_URL}/${CONTAINER}/*?${SOURCE_SAS}" \
+              "${DEST_URL}/${CONTAINER}/?${DEST_SAS}" \
+              --recursive \
+              --overwrite=ifSourceNewer \
+              || echo "⚠️ Algunos archivos pueden no haberse copiado (container puede estar vacío)"
+
+            echo "✅ Container '${CONTAINER}' sincronizado"
+          done
+
+          echo ""
+          echo "✅ Sincronización completada"
+
+      - name: Get Storage info
+        id: storage-info
+        if: inputs.create-storage == true
+        run: |
+          STORAGE_ACCOUNT="${{ steps.names.outputs.storage_account_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          # Obtener connection string
+          CONNECTION_STRING=$(az storage account show-connection-string \
+            --name "${STORAGE_ACCOUNT}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --query connectionString -o tsv)
+
+          # Obtener blob endpoint
+          BLOB_ENDPOINT=$(az storage account show \
+            --name "${STORAGE_ACCOUNT}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --query primaryEndpoints.blob -o tsv)
+
+          echo "connection_string=${CONNECTION_STRING}" >> $GITHUB_OUTPUT
+          echo "blob_endpoint=${BLOB_ENDPOINT}" >> $GITHUB_OUTPUT
+
+          echo "📍 Blob Endpoint: ${BLOB_ENDPOINT}"
+          echo "🔒 Storage Account: ${STORAGE_ACCOUNT}"
+
+      # ==============================
+      # WEB APP
+      # ==============================
+      - name: Create Web App
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          APP_SERVICE_PLAN="${{ vars.AZURE_APP_PLAN }}"
+
+          echo "🔍 Verificando Web App '${WEBAPP_NAME}'..."
+          if az webapp show \
+            --name "${WEBAPP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+            echo "✅ Web App ya existe, actualizando..."
+          else
+            echo "📦 Creando Web App '${WEBAPP_NAME}'..."
+            az webapp create \
+              --name "${WEBAPP_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --plan "${APP_SERVICE_PLAN}" \
+              --deployment-container-image-name "nginx:latest" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+            echo "✅ Web App creada"
+          fi
+
+      - name: Configure container registry
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          DOCKER_REGISTRY="${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}"
+
+          echo "🔧 Configurando container registry..."
+          az webapp config container set \
+            --name "${WEBAPP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --container-image-name "${{ inputs.docker-image-name }}" \
+            --container-registry-url "https://${DOCKER_REGISTRY}" \
+            --container-registry-user "${{ vars.GHCR_USERNAME }}" \
+            --container-registry-password "${{ secrets.CR_PAT }}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+          echo "✅ Container registry configurado"
+
+      - name: Configure app settings
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+          DOCKER_REGISTRY="${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}"
+
+          echo "🔧 Configurando variables de entorno..."
+
+          SETTINGS_ARRAY=()
+
+          # Docker registry settings
+          SETTINGS_ARRAY+=("DOCKER_REGISTRY_SERVER_URL=https://${DOCKER_REGISTRY}")
+          SETTINGS_ARRAY+=("DOCKER_REGISTRY_SERVER_USERNAME=${{ vars.GHCR_USERNAME }}")
+          SETTINGS_ARRAY+=("DOCKER_REGISTRY_SERVER_PASSWORD=${{ secrets.CR_PAT }}")
+          SETTINGS_ARRAY+=("WEBSITES_ENABLE_APP_SERVICE_STORAGE=false")
+
+          # App settings from input
+          if [ -n "${{ inputs.app-settings }}" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                SETTINGS_ARRAY+=("$line")
+              fi
+            done < <(echo '${{ inputs.app-settings }}' | jq -r 'to_entries | map("\(.key)=\(.value)") | .[]')
+          fi
+
+          # Función para URL-encode
+          urlencode() {
+            local string="$1"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+
+            for (( pos=0 ; pos<strlen ; pos++ )); do
+              c=${string:$pos:1}
+              case "$c" in
+                [-_.~a-zA-Z0-9] ) o="$c" ;;
+                * ) printf -v o '%%%02X' "'$c" ;;
+              esac
+              encoded+="$o"
+            done
+            echo "$encoded"
+          }
+
+          # DATABASE_URL
+          if [ "${{ inputs.create-database }}" == "true" ]; then
+            DB_TYPE="${{ inputs.database-type }}"
+            DB_USER="${{ inputs.database-admin-username }}"
+            DB_PASS_RAW="${{ secrets.DATABASE_ADMIN_PASSWORD }}"
+            DB_NAME="${{ inputs.database-name }}"
+            DB_HOST="${{ steps.db-info.outputs.host }}"
+            DB_PORT="${{ steps.db-info.outputs.port }}"
+
+            # URL-encode password
+            DB_PASS=$(urlencode "$DB_PASS_RAW")
+
+            if [ "$DB_TYPE" == "postgresql" ]; then
+              DATABASE_URL="postgresql://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+            else
+              DATABASE_URL="mysql://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require&sslaccept=strict"
+            fi
+
+            echo "🔒 Agregando DATABASE_URL"
+            SETTINGS_ARRAY+=("DATABASE_URL=${DATABASE_URL}")
+          fi
+
+          # Storage connection string
+          if [ "${{ inputs.create-storage }}" == "true" ]; then
+            STORAGE_CONNECTION="${{ steps.storage-info.outputs.connection_string }}"
+            STORAGE_BLOB_URL="${{ steps.storage-info.outputs.blob_endpoint }}"
+
+            echo "🔒 Agregando AZURE_STORAGE_CONNECTION_STRING"
+            SETTINGS_ARRAY+=("AZURE_STORAGE_CONNECTION_STRING=${STORAGE_CONNECTION}")
+            SETTINGS_ARRAY+=("AZURE_STORAGE_BLOB_URL=${STORAGE_BLOB_URL}")
+            SETTINGS_ARRAY+=("AZURE_STORAGE_CONTAINER=${{ inputs.storage-container-name }}")
+          fi
+
+          # Secrets
+          if [ -n "${{ secrets.NEXTAUTH_SECRET }}" ]; then
+            SETTINGS_ARRAY+=("NEXTAUTH_SECRET=${{ secrets.NEXTAUTH_SECRET }}")
+          fi
+
+          if [ -n "${{ secrets.AUTH_SECRET }}" ]; then
+            SETTINGS_ARRAY+=("AUTH_SECRET=${{ secrets.AUTH_SECRET }}")
+          fi
+
+          if [ -n "${{ secrets.SMTP_PASS }}" ]; then
+            SETTINGS_ARRAY+=("SMTP_PASS=${{ secrets.SMTP_PASS }}")
+          fi
+
+          if [ -n "${{ secrets.JWT_SECRET }}" ]; then
+            SETTINGS_ARRAY+=("JWT_SECRET=${{ secrets.JWT_SECRET }}")
+          fi
+
+          # Container port
+          SETTINGS_ARRAY+=("WEBSITES_PORT=${{ inputs.container-port }}")
+
+          # Apply settings
+          echo "📊 Aplicando ${#SETTINGS_ARRAY[@]} variables..."
+          az webapp config appsettings set \
+            --name "${WEBAPP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --settings "${SETTINGS_ARRAY[@]}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            --output none
+
+          echo "✅ Variables configuradas"
+
+      - name: Restart Web App
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          echo "🔄 Reiniciando Web App..."
+          az webapp restart \
+            --name "${WEBAPP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+          echo "✅ Web App reiniciada"
+
+      - name: Get webapp URL
+        id: webapp-info
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          WEBAPP_URL="https://${WEBAPP_NAME}.azurewebsites.net"
+
+          echo "url=${WEBAPP_URL}" >> $GITHUB_OUTPUT
+          echo "🌐 Web App URL: ${WEBAPP_URL}"
+
+      - name: Health check
+        run: |
+          WEBAPP_URL="${{ steps.webapp-info.outputs.url }}"
+
+          echo "⏳ Esperando 30 segundos para que la webapp arranque..."
+          sleep 30
+
+          echo "🏥 Realizando health check..."
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+          SUCCESS=false
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${WEBAPP_URL}" || echo "000")
+            echo "Intento $((RETRY_COUNT + 1))/$MAX_RETRIES: HTTP ${HTTP_CODE}"
+
+            if [ "$HTTP_CODE" == "200" ] || [ "$HTTP_CODE" == "302" ] || [ "$HTTP_CODE" == "301" ]; then
+              echo "✅ Webapp respondió correctamente"
+              SUCCESS=true
+              break
+            fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            [ $RETRY_COUNT -lt $MAX_RETRIES ] && sleep 15
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "⚠️  WARNING: Webapp no respondió. Puede estar iniciando aún."
+          fi
+
+      - name: Generate summary
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          WEBAPP_URL="${{ steps.webapp-info.outputs.url }}"
+
+          echo "## 🚀 App Infrastructure Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Resources Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Name |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App | \`${WEBAPP_NAME}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | [${WEBAPP_URL}](${WEBAPP_URL}) |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.create-database }}" == "true" ]; then
+            echo "| Database Server | \`${{ steps.names.outputs.database_server_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Database | \`${{ inputs.database-name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Database Host | \`${{ steps.db-info.outputs.host }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ inputs.create-storage }}" == "true" ]; then
+            echo "| Storage Account | \`${{ steps.names.outputs.storage_account_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Storage Containers | \`${{ inputs.storage-container-name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Blob Endpoint | \`${{ steps.storage-info.outputs.blob_endpoint }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Public Access | ${{ inputs.storage-public-access }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ inputs.sync-from-storage }}" == "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔄 Storage Sync" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Source | Target |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "| \`${{ inputs.source-storage-account }}\` | \`${{ steps.names.outputs.storage_account_name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Containers: \`${{ inputs.source-containers }}\` | |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Resource Group**: \`${{ vars.AZURE_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker Image**: \`${{ inputs.docker-image-name }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ==============================
+  # JOB 2: APPLY MIGRATIONS
+  # ==============================
+  apply-migrations:
+    name: 🗄️ Apply Migrations
+    runs-on: ubuntu-latest
+    needs: setup-app-resources
+    if: inputs.run-migrations == true && inputs.create-database == true
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check if Prisma exists
+        id: check-prisma
+        run: |
+          if [ -f "prisma/schema.prisma" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No Prisma schema - skipping migrations"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check-prisma.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        if: steps.check-prisma.outputs.exists == 'true'
+        run: |
+          if [ -f "package-lock.json" ]; then
+            echo "📦 Using npm ci (package-lock.json found)"
+            npm ci --legacy-peer-deps --prefer-offline --no-audit
+          else
+            echo "📦 Using npm install (no package-lock.json)"
+            npm install --legacy-peer-deps --no-audit
+          fi
+
+      - name: Apply migrations
+        if: steps.check-prisma.outputs.exists == 'true'
+        env:
+          DB_TYPE: ${{ inputs.database-type }}
+          DB_USER: ${{ inputs.database-admin-username }}
+          DB_PASS: ${{ secrets.DATABASE_ADMIN_PASSWORD }}
+          DB_NAME: ${{ inputs.database-name }}
+          DB_SERVER: ${{ needs.setup-app-resources.outputs.database_server_name }}
+        run: |
+          # URL-encode function
+          urlencode() {
+            local string="$1"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+            for (( pos=0 ; pos<strlen ; pos++ )); do
+              c=${string:$pos:1}
+              case "$c" in
+                [-_.~a-zA-Z0-9] ) o="$c" ;;
+                * ) printf -v o '%%%02X' "'$c" ;;
+              esac
+              encoded+="$o"
+            done
+            echo "$encoded"
+          }
+
+          DB_PASS_ENCODED=$(urlencode "${DB_PASS}")
+
+          if [ "${DB_TYPE}" == "postgresql" ]; then
+            DB_HOST="${DB_SERVER}.postgres.database.azure.com"
+            export DATABASE_URL="postgresql://${DB_USER}:${DB_PASS_ENCODED}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
+          else
+            DB_HOST="${DB_SERVER}.mysql.database.azure.com"
+            export DATABASE_URL="mysql://${DB_USER}:${DB_PASS_ENCODED}@${DB_HOST}:3306/${DB_NAME}?sslmode=require&sslaccept=strict"
+          fi
+
+          echo "🔌 Aplicando migraciones..."
+          echo "   Host: ${DB_HOST}"
+          echo "   Database: ${DB_NAME}"
+
+          if npx prisma migrate deploy 2>&1 | tee migration.log; then
+            if grep -q "P3019" migration.log; then
+              echo "❌ ERROR P3019: Provider mismatch detectado"
+              echo "   El provider en schema.prisma no coincide con la BD"
+              exit 1
+            fi
+            echo "✅ Migraciones aplicadas exitosamente"
+          else
+            if grep -q "already applied\|No pending migrations" migration.log; then
+              echo "ℹ️ No hay migraciones pendientes"
+            else
+              echo "❌ Error aplicando migraciones"
+              cat migration.log
+              exit 1
+            fi
+          fi
+
+      - name: Seed database
+        if: steps.check-prisma.outputs.exists == 'true' && inputs.run-seed == true
+        env:
+          DB_TYPE: ${{ inputs.database-type }}
+          DB_USER: ${{ inputs.database-admin-username }}
+          DB_PASS: ${{ secrets.DATABASE_ADMIN_PASSWORD }}
+          DB_NAME: ${{ inputs.database-name }}
+          DB_SERVER: ${{ needs.setup-app-resources.outputs.database_server_name }}
+        run: |
+          if [ ! -f "prisma/seed.ts" ] && [ ! -f "prisma/seed.js" ]; then
+            echo "ℹ️ No seed file found - skipping"
+            exit 0
+          fi
+
+          urlencode() {
+            local string="$1"
+            local strlen=${#string}
+            local encoded=""
+            local pos c o
+            for (( pos=0 ; pos<strlen ; pos++ )); do
+              c=${string:$pos:1}
+              case "$c" in
+                [-_.~a-zA-Z0-9] ) o="$c" ;;
+                * ) printf -v o '%%%02X' "'$c" ;;
+              esac
+              encoded+="$o"
+            done
+            echo "$encoded"
+          }
+
+          DB_PASS_ENCODED=$(urlencode "${DB_PASS}")
+
+          if [ "${DB_TYPE}" == "postgresql" ]; then
+            DB_HOST="${DB_SERVER}.postgres.database.azure.com"
+            export DATABASE_URL="postgresql://${DB_USER}:${DB_PASS_ENCODED}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
+          else
+            DB_HOST="${DB_SERVER}.mysql.database.azure.com"
+            export DATABASE_URL="mysql://${DB_USER}:${DB_PASS_ENCODED}@${DB_HOST}:3306/${DB_NAME}?sslmode=require&sslaccept=strict"
+          fi
+
+          echo "🌱 Ejecutando seed..."
+          npm install --legacy-peer-deps --no-save ts-node bcryptjs @types/bcryptjs 2>/dev/null || true
+          npx prisma db seed || echo "⚠️ Seed falló o datos ya existen"
+
+      - name: Migration summary
+        if: always()
+        run: |
+          echo "## 🗄️ Database Migrations" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check-prisma.outputs.exists }}" == "true" ]; then
+            if [ "${{ job.status }}" == "success" ]; then
+              echo "✅ Migraciones aplicadas exitosamente" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Error en migraciones" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "ℹ️ No Prisma schema encontrado - migraciones omitidas" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Database Server**: \`${{ needs.setup-app-resources.outputs.database_server_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Database Name**: \`${{ inputs.database-name }}\`" >> $GITHUB_STEP_SUMMARY

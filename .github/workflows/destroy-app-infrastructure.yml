@@ -1,0 +1,290 @@
+name: Destroy App Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      # ==============================
+      # Configuración de la Aplicación
+      # ==============================
+      app-name:
+        required: true
+        type: string
+        description: "Nombre base de la app (ej: fravano)"
+      app-name-suffix:
+        required: false
+        type: string
+        default: ""
+        description: "Sufijo para el nombre (ej: pr-123 para preview)"
+
+      # ==============================
+      # GitHub Environment
+      # ==============================
+      environment:
+        required: false
+        type: string
+        default: "staging"
+        description: "GitHub Environment para obtener AZURE_RESOURCE_GROUP"
+
+      # ==============================
+      # Qué destruir
+      # ==============================
+      destroy-webapp:
+        required: false
+        type: boolean
+        default: true
+        description: "Eliminar Web App"
+      destroy-database:
+        required: false
+        type: boolean
+        default: true
+        description: "Eliminar servidor de base de datos"
+      destroy-storage:
+        required: false
+        type: boolean
+        default: true
+        description: "Eliminar Storage Account"
+
+      # ==============================
+      # Configuración de BD
+      # ==============================
+      database-type:
+        required: false
+        type: string
+        default: "postgresql"
+        description: "Tipo de BD (postgresql o mysql)"
+      database-name:
+        required: false
+        type: string
+        default: "appdb"
+        description: "Nombre de la base de datos a eliminar"
+
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+        description: "Azure Service Principal credentials (JSON)"
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+        description: "Azure Subscription ID"
+
+    outputs:
+      destroyed-webapp:
+        description: "Nombre de la Web App eliminada"
+        value: ${{ jobs.destroy-resources.outputs.webapp_name }}
+      destroyed-database:
+        description: "Nombre del servidor de BD eliminado"
+        value: ${{ jobs.destroy-resources.outputs.database_server_name }}
+      destroyed-storage:
+        description: "Nombre del Storage Account eliminado"
+        value: ${{ jobs.destroy-resources.outputs.storage_account_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  destroy-resources:
+    name: 🗑️ Destroy App Resources
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      webapp_name: ${{ steps.names.outputs.webapp_name }}
+      database_server_name: ${{ steps.names.outputs.database_server_name }}
+      storage_account_name: ${{ steps.names.outputs.storage_account_name }}
+
+    steps:
+      - name: Generate resource names
+        id: names
+        run: |
+          APP_NAME="${{ inputs.app-name }}"
+          SUFFIX="${{ inputs.app-name-suffix }}"
+          DB_TYPE="${{ inputs.database-type }}"
+
+          # Nombre de Web App
+          if [ -n "$SUFFIX" ]; then
+            WEBAPP_NAME="${APP_NAME}-${SUFFIX}"
+          else
+            WEBAPP_NAME="${APP_NAME}"
+          fi
+
+          # Nombre del servidor de BD
+          if [ "${DB_TYPE}" == "postgresql" ]; then
+            if [ -n "$SUFFIX" ]; then
+              DB_SERVER_NAME="${APP_NAME}-pg-${SUFFIX}"
+            else
+              DB_SERVER_NAME="${APP_NAME}-prod-pg"
+            fi
+          else
+            if [ -n "$SUFFIX" ]; then
+              DB_SERVER_NAME="${APP_NAME}-mysql-${SUFFIX}"
+            else
+              DB_SERVER_NAME="${APP_NAME}-prod-mysql"
+            fi
+          fi
+
+          # Nombre del Storage Account
+          STORAGE_BASE=$(echo "${APP_NAME}${SUFFIX}" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          STORAGE_ACCOUNT_NAME="${STORAGE_BASE}st"
+          if [ ${#STORAGE_ACCOUNT_NAME} -gt 24 ]; then
+            STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:0:24}"
+          fi
+
+          echo "webapp_name=${WEBAPP_NAME}" >> $GITHUB_OUTPUT
+          echo "database_server_name=${DB_SERVER_NAME}" >> $GITHUB_OUTPUT
+          echo "storage_account_name=${STORAGE_ACCOUNT_NAME}" >> $GITHUB_OUTPUT
+
+          echo "📋 Recursos a eliminar:"
+          echo "  Web App: ${WEBAPP_NAME}"
+          echo "  Database Server: ${DB_SERVER_NAME}"
+          echo "  Storage Account: ${STORAGE_ACCOUNT_NAME}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ==============================
+      # DESTROY WEB APP
+      # ==============================
+      - name: Delete Web App
+        if: inputs.destroy-webapp == true
+        run: |
+          WEBAPP_NAME="${{ steps.names.outputs.webapp_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          echo "🔍 Verificando Web App '${WEBAPP_NAME}'..."
+          if az webapp show \
+            --name "${WEBAPP_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+
+            echo "🗑️ Eliminando Web App '${WEBAPP_NAME}'..."
+            az webapp delete \
+              --name "${WEBAPP_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+            echo "✅ Web App eliminada"
+          else
+            echo "⚠️ Web App '${WEBAPP_NAME}' no existe"
+          fi
+
+      # ==============================
+      # DESTROY DATABASE
+      # ==============================
+      - name: Delete Database
+        if: inputs.destroy-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+          DB_NAME="${{ inputs.database-name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_COMMAND="postgres"
+          else
+            DB_COMMAND="mysql"
+          fi
+
+          echo "🔍 Verificando base de datos '${DB_NAME}'..."
+          if az ${DB_COMMAND} flexible-server db show \
+            --database-name "${DB_NAME}" \
+            --server-name "${DB_SERVER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+
+            echo "🗑️ Eliminando base de datos '${DB_NAME}'..."
+            az ${DB_COMMAND} flexible-server db delete \
+              --database-name "${DB_NAME}" \
+              --server-name "${DB_SERVER_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --yes
+
+            echo "✅ Base de datos eliminada"
+          else
+            echo "⚠️ Base de datos '${DB_NAME}' no existe"
+          fi
+
+      - name: Delete Database Server
+        if: inputs.destroy-database == true
+        run: |
+          DB_TYPE="${{ inputs.database-type }}"
+          DB_SERVER_NAME="${{ steps.names.outputs.database_server_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          if [ "$DB_TYPE" == "postgresql" ]; then
+            DB_COMMAND="postgres"
+          else
+            DB_COMMAND="mysql"
+          fi
+
+          echo "🔍 Verificando servidor ${DB_TYPE^^} '${DB_SERVER_NAME}'..."
+          if az ${DB_COMMAND} flexible-server show \
+            --name "${DB_SERVER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+
+            echo "🗑️ Eliminando servidor ${DB_TYPE^^} '${DB_SERVER_NAME}'..."
+            az ${DB_COMMAND} flexible-server delete \
+              --name "${DB_SERVER_NAME}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --yes
+
+            echo "✅ Servidor ${DB_TYPE^^} eliminado"
+          else
+            echo "⚠️ Servidor ${DB_TYPE^^} '${DB_SERVER_NAME}' no existe"
+          fi
+
+      # ==============================
+      # DESTROY STORAGE ACCOUNT
+      # ==============================
+      - name: Delete Storage Account
+        if: inputs.destroy-storage == true
+        run: |
+          STORAGE_ACCOUNT="${{ steps.names.outputs.storage_account_name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          echo "🔍 Verificando Storage Account '${STORAGE_ACCOUNT}'..."
+          if az storage account show \
+            --name "${STORAGE_ACCOUNT}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" &>/dev/null; then
+
+            echo "🗑️ Eliminando Storage Account '${STORAGE_ACCOUNT}'..."
+            az storage account delete \
+              --name "${STORAGE_ACCOUNT}" \
+              --resource-group "${RESOURCE_GROUP}" \
+              --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              --yes
+
+            echo "✅ Storage Account eliminado"
+          else
+            echo "⚠️ Storage Account '${STORAGE_ACCOUNT}' no existe"
+          fi
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 🗑️ App Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resources Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Name | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.destroy-webapp }}" == "true" ]; then
+            echo "| Web App | \`${{ steps.names.outputs.webapp_name }}\` | 🗑️ Deleted |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ inputs.destroy-database }}" == "true" ]; then
+            echo "| Database Server | \`${{ steps.names.outputs.database_server_name }}\` | 🗑️ Deleted |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ inputs.destroy-storage }}" == "true" ]; then
+            echo "| Storage Account | \`${{ steps.names.outputs.storage_account_name }}\` | 🗑️ Deleted |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Resource Group**: \`${{ vars.AZURE_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY

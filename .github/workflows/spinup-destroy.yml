@@ -1,0 +1,472 @@
+name: Preview Environment Manager
+
+on:
+  workflow_call:
+    inputs:
+      # ==============================
+      # Configuración del Label/Acción
+      # ==============================
+      label-name:
+        required: true
+        type: string
+        description: "Label name from PR event ('spin up environment', 'destroy app', 'destroy environment')"
+
+      # ==============================
+      # Configuración de la Aplicación
+      # ==============================
+      app-name-prefix:
+        required: true
+        type: string
+        description: "Prefix for app name (will be suffixed with PR number)"
+      docker-image-name:
+        required: true
+        type: string
+        description: "Docker image name to deploy (e.g., ghcr.io/org/app:tag)"
+      container-port:
+        required: false
+        type: string
+        default: "3000"
+        description: "Puerto donde el contenedor escucha"
+      app-settings:
+        required: false
+        type: string
+        description: "JSON string with app settings/environment variables"
+
+      # ==============================
+      # GitHub Environment
+      # ==============================
+      environment:
+        required: false
+        type: string
+        default: "staging"
+        description: "GitHub Environment (staging, production)"
+
+      # ==============================
+      # Configuración de Base de Datos
+      # ==============================
+      create-database:
+        required: false
+        type: boolean
+        default: false
+        description: "Crear base de datos (PostgreSQL o MySQL)"
+      database-type:
+        required: false
+        type: string
+        default: "postgresql"
+        description: "Tipo de BD (postgresql o mysql)"
+      database-admin-username:
+        required: false
+        type: string
+        default: "dbadmin"
+        description: "Usuario admin de la BD"
+      database-name:
+        required: false
+        type: string
+        default: "appdb"
+        description: "Nombre de la base de datos"
+      database-sku:
+        required: false
+        type: string
+        default: "Standard_B1ms"
+        description: "SKU del servidor de BD"
+      database-tier:
+        required: false
+        type: string
+        default: "Burstable"
+        description: "Tier del servidor"
+      database-version:
+        required: false
+        type: string
+        default: "16"
+        description: "Versión de la BD"
+      database-storage-size:
+        required: false
+        type: string
+        default: "32"
+        description: "Tamaño del storage en GB"
+
+      # ==============================
+      # Configuración de Storage Account
+      # ==============================
+      create-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Crear Azure Storage Account"
+      storage-container-name:
+        required: false
+        type: string
+        default: "uploads"
+        description: "Containers a crear (separar con coma)"
+      storage-public-access:
+        required: false
+        type: boolean
+        default: false
+        description: "Permitir acceso público (false = privado)"
+
+      # ==============================
+      # Sincronización de Storage
+      # ==============================
+      sync-from-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Sincronizar desde Storage existente"
+      source-storage-account:
+        required: false
+        type: string
+        default: ""
+        description: "Storage Account origen"
+      source-resource-group:
+        required: false
+        type: string
+        default: ""
+        description: "Resource Group del origen"
+      source-containers:
+        required: false
+        type: string
+        default: ""
+        description: "Containers a sincronizar"
+
+      # ==============================
+      # Legacy MySQL inputs (deprecados)
+      # ==============================
+      create-mysql-database:
+        required: false
+        type: boolean
+        default: false
+        description: "[DEPRECATED] Use create-database"
+      mysql-admin-username:
+        required: false
+        type: string
+        default: "dbadmin"
+      mysql-database-name:
+        required: false
+        type: string
+        default: "appdb"
+      mysql-sku:
+        required: false
+        type: string
+        default: "Standard_B1ms"
+      mysql-tier:
+        required: false
+        type: string
+        default: "Burstable"
+      mysql-version:
+        required: false
+        type: string
+        default: "8.0.21"
+      mysql-storage-size:
+        required: false
+        type: string
+        default: "20"
+
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      CR_PAT:
+        required: true
+      DATABASE_URL:
+        required: false
+      NEXTAUTH_SECRET:
+        required: false
+      AUTH_SECRET:
+        required: false
+      SMTP_PASS:
+        required: false
+      DATABASE_ADMIN_PASSWORD:
+        required: false
+      MYSQL_ADMIN_PASSWORD:
+        required: false
+      JWT_SECRET:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ==============================
+  # JOB 0: VALIDACIÓN
+  # ==============================
+  validate-inputs:
+    name: 🔍 Validate Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      is-valid: ${{ steps.validate.outputs.is_valid }}
+      action: ${{ steps.validate.outputs.action }}
+      webapp-name: ${{ steps.validate.outputs.webapp_name }}
+      db-server-name: ${{ steps.validate.outputs.db_server_name }}
+      storage-account-name: ${{ steps.validate.outputs.storage_account_name }}
+      create-database: ${{ steps.validate.outputs.create_database }}
+      database-type: ${{ steps.validate.outputs.database_type }}
+
+    steps:
+      - name: Validate and generate names
+        id: validate
+        run: |
+          LABEL="${{ inputs.label-name }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          APP_PREFIX="${{ inputs.app-name-prefix }}"
+          IS_VALID="true"
+          ACTION=""
+
+          echo "🔍 Validando configuración..."
+          echo "📋 Label: '${LABEL}'"
+
+          # Determinar acción
+          case "${LABEL}" in
+            "spin up environment")
+              ACTION="setup"
+              echo "🚀 Acción: Crear ambiente"
+              ;;
+            "destroy app")
+              ACTION="destroy-app"
+              echo "🗑️ Acción: Eliminar Web App"
+              ;;
+            "destroy environment")
+              ACTION="destroy-all"
+              echo "🗑️ Acción: Eliminar todo"
+              ;;
+            *)
+              IS_VALID="false"
+              echo "❌ Label inválido: '${LABEL}'"
+              ;;
+          esac
+
+          # Generar nombres de recursos
+          WEBAPP_NAME="${APP_PREFIX}-pr-${PR_NUMBER}"
+
+          # Determinar tipo de BD (nuevo o legacy)
+          CREATE_DB="${{ inputs.create-database }}"
+          DB_TYPE="${{ inputs.database-type }}"
+          if [ "${{ inputs.create-mysql-database }}" == "true" ]; then
+            CREATE_DB="true"
+            DB_TYPE="mysql"
+          fi
+
+          # Nombre del servidor de BD
+          if [ "${DB_TYPE}" == "postgresql" ]; then
+            DB_SERVER_NAME="${APP_PREFIX}-pg-pr-${PR_NUMBER}"
+          else
+            DB_SERVER_NAME="${APP_PREFIX}-mysql-pr-${PR_NUMBER}"
+          fi
+
+          # Nombre del Storage Account
+          STORAGE_BASE=$(echo "${APP_PREFIX}pr${PR_NUMBER}" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          STORAGE_ACCOUNT_NAME="${STORAGE_BASE}st"
+          if [ ${#STORAGE_ACCOUNT_NAME} -gt 24 ]; then
+            STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:0:24}"
+          fi
+
+          # Outputs
+          echo "is_valid=${IS_VALID}" >> $GITHUB_OUTPUT
+          echo "action=${ACTION}" >> $GITHUB_OUTPUT
+          echo "webapp_name=${WEBAPP_NAME}" >> $GITHUB_OUTPUT
+          echo "db_server_name=${DB_SERVER_NAME}" >> $GITHUB_OUTPUT
+          echo "storage_account_name=${STORAGE_ACCOUNT_NAME}" >> $GITHUB_OUTPUT
+          echo "create_database=${CREATE_DB}" >> $GITHUB_OUTPUT
+          echo "database_type=${DB_TYPE}" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "📋 Recursos:"
+          echo "  Web App: ${WEBAPP_NAME}"
+          echo "  DB Server: ${DB_SERVER_NAME}"
+          echo "  Storage: ${STORAGE_ACCOUNT_NAME}"
+
+      - name: Comment error on PR
+        if: steps.validate.outputs.is_valid == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ Validation Error\n\nLabel inválido: \`${{ inputs.label-name }}\`\n\n**Labels válidos:**\n- \`spin up environment\`\n- \`destroy app\`\n- \`destroy environment\``
+            })
+
+  # ==============================
+  # JOB 1: SETUP BASE INFRASTRUCTURE
+  # ==============================
+  setup-base-infrastructure:
+    name: 🏗️ Setup Base Infrastructure
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.action == 'setup'
+    uses: Kuniqo/reusable-workflows/.github/workflows/setup-azure-infrastructure.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  # ==============================
+  # JOB 2: SETUP APP INFRASTRUCTURE
+  # ==============================
+  setup-app-infrastructure:
+    name: 🚀 Setup App Infrastructure
+    needs: [validate-inputs, setup-base-infrastructure]
+    if: needs.validate-inputs.outputs.action == 'setup'
+    uses: Kuniqo/reusable-workflows/.github/workflows/setup-app-infrastructure.yml@main
+    with:
+      app-name: ${{ inputs.app-name-prefix }}
+      app-name-suffix: pr-${{ github.event.pull_request.number }}
+      environment: ${{ inputs.environment }}
+      docker-image-name: ${{ inputs.docker-image-name }}
+      container-port: ${{ inputs.container-port }}
+      # Database
+      create-database: ${{ inputs.create-database || inputs.create-mysql-database }}
+      database-type: ${{ needs.validate-inputs.outputs.database-type }}
+      database-admin-username: ${{ inputs.database-admin-username || inputs.mysql-admin-username }}
+      database-name: ${{ inputs.database-name || inputs.mysql-database-name }}
+      database-sku: ${{ inputs.database-sku || inputs.mysql-sku }}
+      database-tier: ${{ inputs.database-tier || inputs.mysql-tier }}
+      database-version: ${{ inputs.database-version || inputs.mysql-version }}
+      database-storage-size: ${{ inputs.database-storage-size || inputs.mysql-storage-size }}
+      # Storage
+      create-storage: ${{ inputs.create-storage }}
+      storage-container-name: ${{ inputs.storage-container-name }}
+      storage-public-access: ${{ inputs.storage-public-access }}
+      sync-from-storage: ${{ inputs.sync-from-storage }}
+      source-storage-account: ${{ inputs.source-storage-account }}
+      source-resource-group: ${{ inputs.source-resource-group }}
+      source-containers: ${{ inputs.source-containers }}
+      # Migrations
+      run-migrations: true
+      run-seed: false
+      # App settings
+      app-settings: ${{ inputs.app-settings }}
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      CR_PAT: ${{ secrets.CR_PAT }}
+      DATABASE_ADMIN_PASSWORD: ${{ secrets.DATABASE_ADMIN_PASSWORD || secrets.MYSQL_ADMIN_PASSWORD }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+  # ==============================
+  # JOB 3: NOTIFY SUCCESS
+  # ==============================
+  notify-success:
+    name: 📢 Notify Success
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, setup-app-infrastructure]
+    if: |
+      always() &&
+      needs.validate-inputs.outputs.action == 'setup' &&
+      needs.setup-app-infrastructure.result == 'success'
+
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const webappName = '${{ needs.validate-inputs.outputs.webapp-name }}';
+            const webappUrl = '${{ needs.setup-app-infrastructure.outputs.webapp-url }}';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚀 Preview Environment Ready!\n\n` +
+                    `- **URL**: ${webappUrl}\n` +
+                    `- **Web App**: \`${webappName}\`\n\n` +
+                    `**Management:**\n` +
+                    `- Delete Web App only: Add \`destroy app\` label\n` +
+                    `- Delete everything: Add \`destroy environment\` label`
+            })
+
+  # ==============================
+  # JOB 5: DESTROY WEB APP ONLY
+  # ==============================
+  destroy-webapp-only:
+    name: 🗑️ Destroy Web App Only
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.action == 'destroy-app'
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Delete Web App
+        run: |
+          WEBAPP_NAME="${{ needs.validate-inputs.outputs.webapp-name }}"
+          RESOURCE_GROUP="${{ vars.AZURE_RESOURCE_GROUP }}"
+
+          echo "🗑️ Eliminando Web App '${WEBAPP_NAME}'..."
+          if az webapp show --name "${WEBAPP_NAME}" --resource-group "${RESOURCE_GROUP}" &>/dev/null; then
+            az webapp delete --name "${WEBAPP_NAME}" --resource-group "${RESOURCE_GROUP}"
+            echo "✅ Web App eliminada"
+          else
+            echo "⚠️ Web App no existe"
+          fi
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🗑️ Web App Deleted\n\n\`${{ needs.validate-inputs.outputs.webapp-name }}\` ha sido eliminada.\n\n**Recursos preservados:** DB, Storage, App Plan\n\n- Recrear: Agregar \`spin up environment\`\n- Eliminar todo: Agregar \`destroy environment\``
+            })
+
+  # ==============================
+  # JOB 6: DESTROY ALL
+  # ==============================
+  destroy-all:
+    name: 🗑️ Destroy All Resources
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.action == 'destroy-all'
+    uses: Kuniqo/reusable-workflows/.github/workflows/destroy-app-infrastructure.yml@main
+    with:
+      app-name: ${{ inputs.app-name-prefix }}
+      app-name-suffix: pr-${{ github.event.pull_request.number }}
+      environment: ${{ inputs.environment }}
+      destroy-webapp: true
+      destroy-database: ${{ inputs.create-database || inputs.create-mysql-database }}
+      destroy-storage: ${{ inputs.create-storage }}
+      database-type: ${{ inputs.database-type }}
+      database-name: ${{ inputs.database-name || inputs.mysql-database-name }}
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  # ==============================
+  # JOB 7: NOTIFY DESTRUCTION
+  # ==============================
+  notify-destruction:
+    name: 📢 Notify Destruction
+    runs-on: ubuntu-latest
+    needs: [validate-inputs, destroy-all]
+    if: |
+      always() &&
+      needs.validate-inputs.outputs.action == 'destroy-all'
+
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const success = '${{ needs.destroy-all.result }}' === 'success';
+            const webappName = '${{ needs.validate-inputs.outputs.webapp-name }}';
+
+            const body = success
+              ? `## 🗑️ Environment Destroyed\n\nTodos los recursos de \`${webappName}\` han sido eliminados.`
+              : `## ⚠️ Destruction Warning\n\nAlgunos recursos pueden no haberse eliminado. Verifica en Azure Portal.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            })

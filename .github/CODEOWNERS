@@ -1,0 +1,5 @@
+# ===============================================
+# Solo el equipo DevOps puede aprobar PRs hacia main
+# ===============================================
+
+* @My-Doctor-Medical-Group/devops

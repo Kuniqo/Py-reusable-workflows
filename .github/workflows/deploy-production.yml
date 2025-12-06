@@ -1,0 +1,296 @@
+name: Deploy to Production
+
+on:
+  workflow_call:
+    inputs:
+      # ==============================
+      # Configuración de la Aplicación
+      # ==============================
+      app-name:
+        required: true
+        type: string
+        description: "Nombre de la Web App en Azure"
+      docker-image-name:
+        required: true
+        type: string
+        description: "Docker image name to deploy (e.g., ghcr.io/org/app:tag)"
+      container-port:
+        required: false
+        type: string
+        default: "3000"
+        description: "Puerto donde el contenedor escucha"
+      app-settings:
+        required: false
+        type: string
+        description: "JSON string with app settings/environment variables"
+
+      # ==============================
+      # GitHub Environment
+      # ==============================
+      environment:
+        required: false
+        type: string
+        default: "production"
+        description: "GitHub Environment (staging, production)"
+
+      # ==============================
+      # Configuración de Base de Datos
+      # ==============================
+      create-database:
+        required: false
+        type: boolean
+        default: true
+        description: "Crear base de datos"
+      database-type:
+        required: false
+        type: string
+        default: "postgresql"
+        description: "Tipo de BD (postgresql o mysql)"
+      database-server-name:
+        required: false
+        type: string
+        description: "Nombre del servidor de BD (default: {app-name}-prod-pg)"
+      database-admin-username:
+        required: false
+        type: string
+        default: "dbadmin"
+        description: "Usuario admin de la BD"
+      database-name:
+        required: false
+        type: string
+        default: "appdb"
+        description: "Nombre de la base de datos"
+      database-sku:
+        required: false
+        type: string
+        default: "Standard_B1ms"
+        description: "SKU del servidor de BD"
+      database-tier:
+        required: false
+        type: string
+        default: "Burstable"
+        description: "Tier del servidor"
+      database-version:
+        required: false
+        type: string
+        default: "16"
+        description: "Versión de la BD"
+      database-storage-size:
+        required: false
+        type: string
+        default: "32"
+        description: "Tamaño del storage en GB"
+
+      # ==============================
+      # Configuración de Storage Account
+      # ==============================
+      create-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Crear Azure Storage Account"
+      storage-account-name:
+        required: false
+        type: string
+        default: ""
+        description: "Nombre del Storage Account (override). Si vacío, se genera automáticamente"
+      storage-container-name:
+        required: false
+        type: string
+        default: "uploads"
+        description: "Containers a crear (separar con coma)"
+      storage-public-access:
+        required: false
+        type: boolean
+        default: false
+        description: "Permitir acceso público (false = privado)"
+
+      # ==============================
+      # Sincronización de Storage
+      # ==============================
+      sync-from-storage:
+        required: false
+        type: boolean
+        default: false
+        description: "Sincronizar desde Storage existente"
+      source-storage-account:
+        required: false
+        type: string
+        default: ""
+        description: "Storage Account origen"
+      source-resource-group:
+        required: false
+        type: string
+        default: ""
+        description: "Resource Group del origen"
+      source-containers:
+        required: false
+        type: string
+        default: ""
+        description: "Containers a sincronizar"
+
+      # ==============================
+      # Opciones de Despliegue
+      # ==============================
+      run-migrations:
+        required: false
+        type: boolean
+        default: true
+        description: "Ejecutar migraciones de Prisma"
+      run-seed:
+        required: false
+        type: boolean
+        default: false
+        description: "Ejecutar seed de Prisma"
+
+      # ==============================
+      # Overrides de Recursos (opcional)
+      # ==============================
+      resource-group-name:
+        required: false
+        type: string
+        description: "Override nombre del Resource Group"
+      app-service-plan-name:
+        required: false
+        type: string
+        description: "Override nombre del App Service Plan"
+      azure-location:
+        required: false
+        type: string
+        description: "Override región de Azure"
+      azure-sku:
+        required: false
+        type: string
+        description: "Override SKU del App Service Plan"
+
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      CR_PAT:
+        required: true
+      DATABASE_URL:
+        required: false
+      DATABASE_ADMIN_PASSWORD:
+        required: false
+      NEXTAUTH_SECRET:
+        required: false
+      AUTH_SECRET:
+        required: false
+      SMTP_PASS:
+        required: false
+      JWT_SECRET:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ==============================
+  # JOB 1: SETUP BASE INFRASTRUCTURE
+  # ==============================
+  setup-base-infrastructure:
+    name: 🏗️ Setup Base Infrastructure
+    uses: Kuniqo/reusable-workflows/.github/workflows/setup-azure-infrastructure.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+      resource-group-name: ${{ inputs.resource-group-name }}
+      app-service-plan-name: ${{ inputs.app-service-plan-name }}
+      azure-location: ${{ inputs.azure-location }}
+      azure-sku: ${{ inputs.azure-sku }}
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  # ==============================
+  # JOB 2: SETUP APP INFRASTRUCTURE
+  # ==============================
+  setup-app-infrastructure:
+    name: 🚀 Setup App Infrastructure
+    needs: setup-base-infrastructure
+    uses: Kuniqo/reusable-workflows/.github/workflows/setup-app-infrastructure.yml@main
+    with:
+      app-name: ${{ inputs.app-name }}
+      app-name-suffix: ""  # Sin sufijo para producción
+      environment: ${{ inputs.environment }}
+      docker-image-name: ${{ inputs.docker-image-name }}
+      container-port: ${{ inputs.container-port }}
+      # Database
+      create-database: ${{ inputs.create-database }}
+      database-type: ${{ inputs.database-type }}
+      database-admin-username: ${{ inputs.database-admin-username }}
+      database-name: ${{ inputs.database-name }}
+      database-sku: ${{ inputs.database-sku }}
+      database-tier: ${{ inputs.database-tier }}
+      database-version: ${{ inputs.database-version }}
+      database-storage-size: ${{ inputs.database-storage-size }}
+      # Storage
+      create-storage: ${{ inputs.create-storage }}
+      storage-account-name: ${{ inputs.storage-account-name }}
+      storage-container-name: ${{ inputs.storage-container-name }}
+      storage-public-access: ${{ inputs.storage-public-access }}
+      sync-from-storage: ${{ inputs.sync-from-storage }}
+      source-storage-account: ${{ inputs.source-storage-account }}
+      source-resource-group: ${{ inputs.source-resource-group }}
+      source-containers: ${{ inputs.source-containers }}
+      # Migrations
+      run-migrations: ${{ inputs.run-migrations }}
+      run-seed: ${{ inputs.run-seed }}
+      # App settings
+      app-settings: ${{ inputs.app-settings }}
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      CR_PAT: ${{ secrets.CR_PAT }}
+      DATABASE_ADMIN_PASSWORD: ${{ secrets.DATABASE_ADMIN_PASSWORD }}
+      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+  # ==============================
+  # JOB 3: DEPLOYMENT SUMMARY
+  # ==============================
+  deployment-summary:
+    name: 📋 Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [setup-base-infrastructure, setup-app-infrastructure]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🚀 Production Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.setup-app-infrastructure.result }}" == "success" ]; then
+            echo "✅ **Deployment Successful**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Deployment Failed**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App | \`${{ needs.setup-app-infrastructure.outputs.webapp-name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ needs.setup-app-infrastructure.outputs.webapp-url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Image | \`${{ inputs.docker-image-name }}\` |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.create-database }}" == "true" ]; then
+            echo "| Database Server | \`${{ needs.setup-app-infrastructure.outputs.database-server-name }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Database Host | \`${{ needs.setup-app-infrastructure.outputs.database-host }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ inputs.create-storage }}" == "true" ]; then
+            echo "| Storage Account | \`${{ needs.setup-app-infrastructure.outputs.storage-account-name }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Migrations" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Run Migrations: ${{ inputs.run-migrations }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Run Seed: ${{ inputs.run-seed }}" >> $GITHUB_STEP_SUMMARY

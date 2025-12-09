@@ -1,108 +1,51 @@
-name: Tests & Coverage (Reusable - Universal)
+name: Tests & Coverage (Reusable - Python)
 
 on:
   workflow_call:
     inputs:
-      language:
-        required: true
-        type: string
-        description: "Lenguaje a testear: 'python', 'javascript', o 'typescript'"
       python-version:
         required: false
         type: string
         default: "3.12"
-      node-version:
-        required: false
-        type: string
-        default: "20"
       coverage-min:
         required: false
         type: number
         default: 60
-        description: "Porcentaje mínimo de coverage requerido"
+        description: "Porcentaje minimo de coverage requerido"
       skip-tests:
         required: false
         type: boolean
         default: false
-        description: "Saltar la ejecución de tests"
-      # Variables públicas como inputs
-      BASE_URL:
-        required: false
-        type: string
-        description: "Base URL for the application"
-      NEXTAUTH_URL:
-        required: false
-        type: string
-        description: "NextAuth base URL"
-      NEXT_PUBLIC_BASE_URL:
-        required: false
-        type: string
-        description: "Public base URL for Next.js"
-      SMTP_HOST:
-        required: false
-        type: string
-        description: "SMTP server host"
-      SMTP_PORT:
-        required: false
-        type: string
-        description: "SMTP server port"
-      SMTP_USER:
-        required: false
-        type: string
-        description: "SMTP username"
-    secrets:
-      DATABASE_URL:
-        required: false
-        description: "Database connection URL"
-      NEXTAUTH_SECRET:
-        required: false
-        description: "NextAuth secret key"
-      AUTH_SECRET:
-        required: false
-        description: "Auth secret key"
-      SMTP_PASS:
-        required: false
-        description: "SMTP password"
+        description: "Saltar la ejecucion de tests"
     outputs:
-      # Python outputs
       coverage_percent:
-        description: "Porcentaje de coverage (Python)"
+        description: "Porcentaje de coverage"
         value: ${{ jobs.python-tests.outputs.coverage_percent }}
       tests_passed:
-        description: "Número de tests que pasaron"
-        value: ${{ jobs.python-tests.outputs.tests_passed || jobs.js-ts-tests.outputs.tests_passed }}
+        description: "Numero de tests que pasaron"
+        value: ${{ jobs.python-tests.outputs.tests_passed }}
       tests_failed:
-        description: "Número de tests que fallaron"
-        value: ${{ jobs.python-tests.outputs.tests_failed || jobs.js-ts-tests.outputs.tests_failed }}
+        description: "Numero de tests que fallaron"
+        value: ${{ jobs.python-tests.outputs.tests_failed }}
       pytest_outcome:
-        description: "Resultado de pytest (Python)"
+        description: "Resultado de pytest"
         value: ${{ jobs.python-tests.outputs.pytest_outcome }}
       has_critical_errors:
-        description: "Si hay errores críticos (Python)"
+        description: "Si hay errores criticos"
         value: ${{ jobs.python-tests.outputs.has_critical_errors }}
       coverage_ok:
-        description: "Si el coverage cumple con el mínimo (Python)"
+        description: "Si el coverage cumple con el minimo"
         value: ${{ jobs.python-tests.outputs.coverage_ok }}
-      # JS/TS outputs
-      tests_outcome:
-        description: "Resultado de tests (JS/TS)"
-        value: ${{ jobs.js-ts-tests.outputs.tests_outcome }}
-      tests_skipped:
-        description: "Si los tests fueron saltados (JS/TS)"
-        value: ${{ jobs.js-ts-tests.outputs.tests_skipped }}
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  # ==============================
-  #  PYTHON TESTS & COVERAGE
-  # ==============================
   python-tests:
     name: Python Tests & Coverage
     runs-on: ubuntu-latest
-    if: inputs.language == 'python'
+    if: ${{ !inputs.skip-tests }}
     outputs:
       coverage_percent: ${{ steps.pytest.outputs.coverage_percent }}
       tests_passed: ${{ steps.pytest.outputs.tests_passed }}
@@ -142,45 +85,45 @@ jobs:
           HAS_CRITICAL_ERRORS="false"
           COVERAGE_OK="false"
 
-          # Extraer estadísticas de coverage
+          # Extraer estadisticas de coverage
           if [ -f "coverage.xml" ]; then
             COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' coverage.xml | head -1 || echo "0")
             COVERAGE_PERCENT=$(echo "$COVERAGE * 100" | bc | cut -d. -f1)
             echo "coverage_percent=$COVERAGE_PERCENT" >> $GITHUB_OUTPUT
-            echo "📊 Cobertura: ${COVERAGE_PERCENT}%"
+            echo "Cobertura: ${COVERAGE_PERCENT}%"
 
-            # Validar coverage mínimo
+            # Validar coverage minimo
             if [ "$COVERAGE_PERCENT" -ge ${{ inputs.coverage-min }} ]; then
-              echo "✅ Coverage OK (${COVERAGE_PERCENT}% >= ${{ inputs.coverage-min }}%)"
+              echo "Coverage OK (${COVERAGE_PERCENT}% >= ${{ inputs.coverage-min }}%)"
               COVERAGE_OK="true"
             else
-              echo "❌ Coverage bajo (${COVERAGE_PERCENT}% < ${{ inputs.coverage-min }}%)"
-              echo "::error::🔴 CRÍTICO: Coverage insuficiente (${COVERAGE_PERCENT}% < ${{ inputs.coverage-min }}%). Ver detalles en artifacts: python-coverage-report"
+              echo "Coverage bajo (${COVERAGE_PERCENT}% < ${{ inputs.coverage-min }}%)"
+              echo "::error::CRITICO: Coverage insuficiente (${COVERAGE_PERCENT}% < ${{ inputs.coverage-min }}%). Ver detalles en artifacts: python-coverage-report"
               COVERAGE_OK="false"
             fi
           else
-            echo "⚠️ No se generó reporte de coverage"
+            echo "No se genero reporte de coverage"
             echo "coverage_percent=0" >> $GITHUB_OUTPUT
             COVERAGE_OK="false"
           fi
 
           echo "coverage_ok=$COVERAGE_OK" >> $GITHUB_OUTPUT
 
-          # Extraer estadísticas de tests
+          # Extraer estadisticas de tests
           TESTS_PASSED=$(grep -oP '\d+(?= passed)' pytest-output.txt | head -1 || echo "0")
           TESTS_FAILED=$(grep -oP '\d+(?= failed)' pytest-output.txt | head -1 || echo "0")
           echo "tests_passed=$TESTS_PASSED" >> $GITHUB_OUTPUT
           echo "tests_failed=$TESTS_FAILED" >> $GITHUB_OUTPUT
-          echo "📊 Tests: ✅ $TESTS_PASSED | ❌ $TESTS_FAILED"
+          echo "Tests: $TESTS_PASSED passed | $TESTS_FAILED failed"
 
-          # Detectar errores críticos (FAILED con ERROR, Exception, etc.)
+          # Detectar errores criticos (FAILED con ERROR, Exception, etc.)
           if grep -iE "(FAILED.*ERROR|Exception|Critical|Fatal|Segmentation fault)" pytest-output.txt | grep -vE "(test/|tests/|_test\.py|test_.*\.py)" > critical-errors-filtered.txt 2>/dev/null && [ -s critical-errors-filtered.txt ]; then
-            echo "❌ Detectados errores CRÍTICOS en código de producción (fuera de tests)"
+            echo "Detectados errores CRITICOS en codigo de produccion (fuera de tests)"
             CRITICAL_LINES=$(head -5 critical-errors-filtered.txt)
-            echo "::error::🔴 CRÍTICO: Código de producción contiene errores críticos:%0A${CRITICAL_LINES//$'\n'/%0A}%0A%0AVer detalles completos en artifacts: python-logs"
+            echo "::error::CRITICO: Codigo de produccion contiene errores criticos:%0A${CRITICAL_LINES//$'\n'/%0A}%0A%0AVer detalles completos en artifacts: python-logs"
             HAS_CRITICAL_ERRORS="true"
           else
-            echo "✅ No se detectaron errores críticos en código de producción"
+            echo "No se detectaron errores criticos en codigo de produccion"
             HAS_CRITICAL_ERRORS="false"
           fi
 
@@ -188,21 +131,21 @@ jobs:
 
           # Resultado final
           if [ "$HAS_CRITICAL_ERRORS" == "true" ]; then
-            echo "❌ FALLA: Hay errores críticos en código de producción"
+            echo "FALLA: Hay errores criticos en codigo de produccion"
             exit 1
           elif [ "$COVERAGE_OK" == "false" ]; then
-            echo "❌ FALLA: Coverage insuficiente (< ${{ inputs.coverage-min }}%)"
+            echo "FALLA: Coverage insuficiente (< ${{ inputs.coverage-min }}%)"
             exit 1
           elif [ $PYTEST_EXIT -eq 0 ]; then
-            echo "✅ Todos los tests pasaron"
+            echo "Todos los tests pasaron"
             exit 0
           elif [ $PYTEST_EXIT -eq 5 ]; then
-            echo "⚠️ No se encontraron tests"
+            echo "No se encontraron tests"
             echo "::warning::No se encontraron tests. Considera agregar tests a tu proyecto."
             exit 0
           else
-            echo "⚠️ Algunos tests fallaron, pero sin errores críticos y coverage OK"
-            echo "✅ El build puede continuar"
+            echo "Algunos tests fallaron, pero sin errores criticos y coverage OK"
+            echo "El build puede continuar"
             exit 0
           fi
 
@@ -210,10 +153,10 @@ jobs:
         if: always() && steps.pytest.outcome != 'skipped'
         run: |
           if [ -d "htmlcov" ] || [ -f "coverage.xml" ]; then
-            echo "✅ Reportes de coverage encontrados"
+            echo "Reportes de coverage encontrados"
             ls -lah htmlcov/ coverage.xml .coverage 2>/dev/null || true
           else
-            echo "::warning::⚠️ No se generaron reportes de coverage. Verifica pytest-cov en las dependencias."
+            echo "::warning::No se generaron reportes de coverage. Verifica pytest-cov en las dependencias."
           fi
 
       - name: Upload coverage reports
@@ -249,188 +192,5 @@ jobs:
         with:
           name: python-package-${{ github.run_id }}
           path: dist/
-          retention-days: 30
-          if-no-files-found: warn
-
-  # ==============================
-  #  JAVASCRIPT/TYPESCRIPT TESTS & COVERAGE
-  # ==============================
-  js-ts-tests:
-    name: JavaScript/TypeScript Tests & Coverage
-    runs-on: ubuntu-latest
-    if: inputs.language == 'javascript' || inputs.language == 'typescript'
-    env:
-      BASE_URL: ${{ inputs.BASE_URL }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
-      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
-      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
-      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
-      SMTP_HOST: ${{ inputs.SMTP_HOST }}
-      SMTP_PORT: ${{ inputs.SMTP_PORT }}
-      SMTP_USER: ${{ inputs.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-    outputs:
-      tests_outcome: ${{ steps.tests.outcome }}
-      tests_skipped: ${{ steps.tests.outputs.tests_skipped }}
-      tests_passed: ${{ steps.tests.outputs.tests_passed }}
-      tests_failed: ${{ steps.tests.outputs.tests_failed }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: "npm"
-
-      - name: Install Node dependencies
-        run: npm ci --prefer-offline --no-audit
-
-      - name: Download build artifacts
-        id: download-build
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: js-ts-build-artifacts-${{ github.run_id }}
-          path: .
-
-      - name: Extract build artifacts
-        if: steps.download-build.outcome == 'success'
-        run: |
-          if [ -f "build-artifacts.tar.gz" ]; then
-            echo "📦 Extrayendo build artifacts..."
-            tar -xzf build-artifacts.tar.gz
-            rm build-artifacts.tar.gz
-            echo "✅ Build artifacts extraídos exitosamente"
-
-            # Verificar que el directorio fue extraído
-            if [ -d ".next" ]; then
-              BUILD_SIZE=$(du -sh .next | cut -f1)
-              echo "📊 Directorio .next extraído: $BUILD_SIZE"
-              ls -lah .next/ | head -5
-            fi
-          else
-            echo "⚠️ No se encontró build-artifacts.tar.gz"
-          fi
-
-      - name: Check build artifacts
-        if: steps.download-build.outcome == 'failure'
-        run: |
-          echo "⚠️ No se encontraron artifacts del build"
-          echo "Esto es normal si el proyecto no genera .next/, dist/, o build/"
-          echo "Los tests continuarán sin los artifacts del build"
-
-      - name: Run Tests with Coverage
-        id: tests
-        if: ${{ !inputs.skip-tests }}
-        continue-on-error: true
-        run: |
-          # Verificar si existe script de test:coverage, sino usar test
-          if npm run test:coverage --if-present --dry-run 2>&1 | grep -q "Missing script"; then
-            # Si no existe test:coverage, intentar con test
-            if npm run test --if-present --dry-run 2>&1 | grep -q "Missing script"; then
-              echo "⚠️ No hay script de test configurado en package.json"
-              echo "tests_skipped=true" >> $GITHUB_OUTPUT
-              exit 0
-            else
-              echo "⚠️ Script test:coverage no encontrado, usando npm test"
-              TEST_COMMAND="npm test"
-            fi
-          else
-            echo "✅ Ejecutando tests con coverage"
-            TEST_COMMAND="npm run test:coverage"
-          fi
-
-          set +e
-          $TEST_COMMAND > test-output.txt 2>&1
-          TEST_EXIT=$?
-          set -e
-          cat test-output.txt
-
-          # Extraer estadísticas de tests
-          TESTS_PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | head -1 || echo "0")
-          TESTS_FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | head -1 || echo "0")
-          echo "tests_passed=$TESTS_PASSED" >> $GITHUB_OUTPUT
-          echo "tests_failed=$TESTS_FAILED" >> $GITHUB_OUTPUT
-          echo "📊 Tests: ✅ $TESTS_PASSED | ❌ $TESTS_FAILED"
-
-          if [ $TEST_EXIT -eq 0 ]; then
-            echo "✅ Todos los tests pasaron"
-            exit 0
-          else
-            echo "❌ Tests fallaron (exit code: $TEST_EXIT)"
-
-            # Detectar tipo de error
-            if grep -q "Cannot find module" test-output.txt; then
-              echo "::error::Falta configuración o dependencias de tests. Verifica jest.setup.js y jest.config.js"
-            fi
-
-            if grep -q "ELIFECYCLE" test-output.txt; then
-              echo "::error::Error al ejecutar tests. Verifica que 'npm run test:coverage' funcione localmente"
-            fi
-
-            echo "::warning::$TESTS_FAILED tests fallaron. Revisa test-output.txt en artifacts para más detalles"
-            exit 1
-          fi
-
-      - name: Check coverage directory
-        if: always() && steps.tests.outcome != 'skipped'
-        run: |
-          if [ -d "coverage" ]; then
-            echo "✅ Directorio de coverage encontrado"
-            ls -lah coverage/ | head -10
-          else
-            echo "::warning::⚠️ No se generó el directorio coverage/. Verifica que tu script de test genere reportes de coverage."
-          fi
-
-      - name: Upload coverage report
-        if: always() && steps.tests.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-ts-coverage-${{ github.run_id }}
-          path: coverage/
-          retention-days: 7
-          if-no-files-found: warn
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-ts-test-logs-${{ github.run_id }}
-          path: test-output.txt
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Create tarball for final package
-        if: steps.tests.outcome == 'success'
-        run: |
-          if [ -d ".next" ]; then
-            BUILD_SIZE=$(du -sh .next | cut -f1)
-            echo "📦 Creando tarball del build final para almacenamiento..."
-            echo "📊 Tamaño antes de comprimir: $BUILD_SIZE"
-
-            # Solo incluir .next (el build de Next.js)
-            # Prisma se manejará directamente en el Dockerfile
-            tar -czf build-package.tar.gz .next
-
-            TARBALL_SIZE=$(ls -lh build-package.tar.gz | awk '{print $5}')
-            echo "✅ Tarball creado: build-package.tar.gz ($TARBALL_SIZE)"
-          else
-            echo "⚠️ ADVERTENCIA: .next/ no existe. No se podrá crear el package."
-            echo "Esto puede ocurrir si:"
-            echo "  1. Los build artifacts no se descargaron"
-            echo "  2. El tarball no se extrajo correctamente"
-            exit 1
-          fi
-
-      - name: Upload build package (conditional)
-        if: steps.tests.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-ts-package-${{ github.run_id }}
-          path: build-package.tar.gz
           retention-days: 30
           if-no-files-found: warn

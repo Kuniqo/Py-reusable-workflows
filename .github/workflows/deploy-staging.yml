@@ -1,4 +1,4 @@
-name: Deploy to Staging (Azure)
+name: Deploy to Staging (Azure - Python)
 
 on:
   workflow_call:
@@ -7,10 +7,6 @@ on:
         required: false
         type: string
         default: "3.12"
-      node-version:
-        required: false
-        type: string
-        default: "20"
       docker-registry:
         required: false
         type: string
@@ -35,16 +31,6 @@ on:
       AZURE_CREDENTIALS:
         required: true
         description: "Azure Service Principal credentials (JSON)"
-      DATABASE_URL:
-        required: false
-      NEXTAUTH_URL:
-        required: false
-      NEXTAUTH_SECRET:
-        required: false
-      AUTH_SECRET:
-        required: false
-      NEXT_PUBLIC_BASE_URL:
-        required: false
 
 permissions:
   contents: read
@@ -52,64 +38,21 @@ permissions:
 
 jobs:
   # ==============================
-  #  JOB 1: DETECCIÓN DE LENGUAJE
-  # ==============================
-  detect-language:
-    name: Detectar Lenguaje
-    runs-on: ubuntu-latest
-    outputs:
-      language: ${{ steps.detect.outputs.lang }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Detect project type
-        id: detect
-        run: |
-          if [ -f "pyproject.toml" ]; then
-            echo "lang=python" >> $GITHUB_OUTPUT
-            echo "🐍 Proyecto Python detectado"
-          elif [ -f "package.json" ]; then
-            if grep -q '"typescript"' package.json || [ -f "tsconfig.json" ]; then
-              echo "lang=typescript" >> $GITHUB_OUTPUT
-              echo "📘 Proyecto TypeScript detectado"
-            else
-              echo "lang=javascript" >> $GITHUB_OUTPUT
-              echo "📗 Proyecto JavaScript detectado"
-            fi
-          else
-            echo "lang=unknown" >> $GITHUB_OUTPUT
-            echo "❓ Lenguaje no detectado"
-            exit 1
-          fi
-
-  # ==============================
-  #  JOB 2: BUILD (UNIVERSAL)
+  #  JOB 1: BUILD
   # ==============================
   build:
     name: Build Application
-    needs: detect-language
-    if: needs.detect-language.outputs.language != 'unknown'
     uses: ./.github/workflows/build.yml
     with:
-      language: ${{ needs.detect-language.outputs.language }}
       python-version: ${{ inputs.python-version }}
-      node-version: ${{ inputs.node-version }}
-    secrets:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      NEXTAUTH_URL: ${{ secrets.NEXTAUTH_URL }}
-      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
-      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
-      NEXT_PUBLIC_BASE_URL: ${{ secrets.NEXT_PUBLIC_BASE_URL }}
 
   # ==============================
-  #  JOB 3: BUILD & PUSH DOCKER IMAGE
+  #  JOB 2: BUILD & PUSH DOCKER IMAGE
   # ==============================
   build-docker-image:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: [detect-language, build]
+    needs: build
     if: needs.build.result == 'success'
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
@@ -122,42 +65,8 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: build-artifacts-${{ github.run_id }}
-          path: ./artifacts
-
-      - name: Extract build artifacts
-        run: |
-          echo "📦 Extrayendo build artifacts..."
-
-          # Para JS/TS projects
-          if [ -f "./artifacts/build-artifacts.tar.gz" ]; then
-            echo "✅ Encontrado build-artifacts.tar.gz (JS/TS)"
-            cd artifacts
-            tar -xzf build-artifacts.tar.gz
-            rm build-artifacts.tar.gz
-            cd ..
-
-            # Mover artifacts al lugar correcto
-            if [ -d "./artifacts/.next" ]; then
-              echo "📁 Moviendo .next/ al directorio raíz..."
-              mv ./artifacts/.next ./.next
-            elif [ -d "./artifacts/dist" ]; then
-              echo "📁 Moviendo dist/ al directorio raíz..."
-              mv ./artifacts/dist ./dist
-            elif [ -d "./artifacts/build" ]; then
-              echo "📁 Moviendo build/ al directorio raíz..."
-              mv ./artifacts/build ./build
-            fi
-          # Para Python projects
-          elif [ -d "./artifacts/dist" ]; then
-            echo "✅ Encontrado dist/ (Python)"
-            mv ./artifacts/dist ./dist
-          else
-            echo "⚠️ No se encontró estructura de build conocida"
-            ls -la ./artifacts/
-          fi
-
-          echo "✅ Build artifacts extraídos"
+          name: python-build-artifacts-${{ github.run_id }}
+          path: ./dist
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -194,9 +103,9 @@ jobs:
 
       - name: Image build summary
         run: |
-          echo "## 🐳 Docker Image Build" >> $GITHUB_STEP_SUMMARY
+          echo "## Docker Image Build" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Imagen construida y pusheada exitosamente**" >> $GITHUB_STEP_SUMMARY
+          echo "**Imagen construida y pusheada exitosamente**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           REGISTRY="${{ inputs.docker-registry }}"
@@ -212,31 +121,31 @@ jobs:
             PACKAGE_URL="${REGISTRY}/${IMAGE_NAME}"
           fi
 
-          echo "### 📦 Package Information" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Information" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Registry**: \`${REGISTRY}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Image**: \`${IMAGE_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Package URL**: ${PACKAGE_URL}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "### 🏷️ Tags Generated" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags Generated" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "### 📊 Image Digest" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Digest" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "\`${{ steps.docker-build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
 
   # ==============================
-  #  JOB 4: DEPLOY TO AZURE
+  #  JOB 3: DEPLOY TO AZURE
   # ==============================
   deploy-to-azure:
     name: Deploy to Azure Web App
     runs-on: ubuntu-latest
-    needs: [detect-language, build-docker-image]
+    needs: build-docker-image
     if: needs.build-docker-image.result == 'success'
     environment:
       name: ${{ inputs.environment }}
@@ -260,7 +169,7 @@ jobs:
         run: |
           FULL_TAG=$(echo "${{ needs.build-docker-image.outputs.image-tag }}" | head -n1)
           echo "full_tag=${FULL_TAG}" >> $GITHUB_OUTPUT
-          echo "📦 Using image: ${FULL_TAG}"
+          echo "Using image: ${FULL_TAG}"
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
@@ -280,11 +189,11 @@ jobs:
       - name: Deployment summary
         if: always()
         run: |
-          echo "## 🚀 Azure Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "## Azure Deployment" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Deployment exitoso a Azure Web App**" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment exitoso a Azure Web App**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📋 Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Details" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Web App**: \`${{ inputs.azure-webapp-name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Environment**: \`${{ inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
@@ -293,60 +202,58 @@ jobs:
           echo "- **Triggered by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔗 Links" >> $GITHUB_STEP_SUMMARY
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- [🌐 Visit App](https://${{ inputs.azure-webapp-name }}.azurewebsites.net)" >> $GITHUB_STEP_SUMMARY
-          echo "- [⚙️ Azure Portal](https://portal.azure.com)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Visit App](https://${{ inputs.azure-webapp-name }}.azurewebsites.net)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Azure Portal](https://portal.azure.com)" >> $GITHUB_STEP_SUMMARY
 
   # ==============================
-  #  JOB 5: DEPLOYMENT SUMMARY
+  #  JOB 4: DEPLOYMENT SUMMARY
   # ==============================
   deployment-summary:
     name: Final Deployment Summary
     runs-on: ubuntu-latest
-    needs: [detect-language, build, build-docker-image, deploy-to-azure]
+    needs: [build, build-docker-image, deploy-to-azure]
     if: always()
 
     steps:
       - name: Generate final summary
         run: |
-          echo "## 📊 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Language Detection
-          LANGUAGE="${{ needs.detect-language.outputs.language }}"
-          echo "**Lenguaje detectado:** $LANGUAGE" >> $GITHUB_STEP_SUMMARY
+          echo "**Lenguaje:** Python" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Build Status
           BUILD_STATUS="${{ needs.build.result }}"
           if [ "$BUILD_STATUS" == "success" ]; then
-            echo "- ✅ **Build**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            echo "- Build: Exitoso" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ **Build**: Falló ($BUILD_STATUS)" >> $GITHUB_STEP_SUMMARY
+            echo "- Build: Fallo ($BUILD_STATUS)" >> $GITHUB_STEP_SUMMARY
           fi
 
           # Docker Build Status
           DOCKER_STATUS="${{ needs.build-docker-image.result }}"
           if [ "$DOCKER_STATUS" == "success" ]; then
-            echo "- ✅ **Docker Build**: Imagen construida exitosamente" >> $GITHUB_STEP_SUMMARY
+            echo "- Docker Build: Imagen construida exitosamente" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ **Docker Build**: Falló ($DOCKER_STATUS)" >> $GITHUB_STEP_SUMMARY
+            echo "- Docker Build: Fallo ($DOCKER_STATUS)" >> $GITHUB_STEP_SUMMARY
           fi
 
           # Deployment Status
           DEPLOY_STATUS="${{ needs.deploy-to-azure.result }}"
           if [ "$DEPLOY_STATUS" == "success" ]; then
-            echo "- ✅ **Azure Deployment**: Exitoso" >> $GITHUB_STEP_SUMMARY
+            echo "- Azure Deployment: Exitoso" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 🎉 Deployment Completado" >> $GITHUB_STEP_SUMMARY
+            echo "### Deployment Completado" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Tu aplicación está ahora en vivo en:" >> $GITHUB_STEP_SUMMARY
+            echo "Tu aplicacion esta ahora en vivo en:" >> $GITHUB_STEP_SUMMARY
             echo "**https://${{ inputs.azure-webapp-name }}.azurewebsites.net**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ **Azure Deployment**: Falló ($DEPLOY_STATUS)" >> $GITHUB_STEP_SUMMARY
+            echo "- Azure Deployment: Fallo ($DEPLOY_STATUS)" >> $GITHUB_STEP_SUMMARY
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "🕐 **Deployment Time**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Time**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

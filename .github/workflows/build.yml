@@ -1,85 +1,27 @@
-name: Build Packages (Reusable - Universal)
+name: Build Packages (Reusable - Python)
 
 on:
   workflow_call:
     inputs:
-      language:
-        required: true
-        type: string
-        description: "Lenguaje a construir: 'python', 'javascript', o 'typescript'"
       python-version:
         required: false
         type: string
         default: "3.12"
-      node-version:
-        required: false
-        type: string
-        default: "20"
-      # Variables públicas como inputs
-      BASE_URL:
-        required: false
-        type: string
-        description: "Base URL for the application (build time)"
-      NEXTAUTH_URL:
-        required: false
-        type: string
-        description: "NextAuth base URL"
-      NEXT_PUBLIC_BASE_URL:
-        required: false
-        type: string
-        description: "Public base URL for Next.js"
-      SMTP_HOST:
-        required: false
-        type: string
-        description: "SMTP server host"
-      SMTP_PORT:
-        required: false
-        type: string
-        description: "SMTP server port"
-      SMTP_USER:
-        required: false
-        type: string
-        description: "SMTP username"
-    secrets:
-      DATABASE_URL:
-        required: false
-        description: "Database connection URL"
-      NEXTAUTH_SECRET:
-        required: false
-        description: "NextAuth secret key"
-      AUTH_SECRET:
-        required: false
-        description: "Auth secret key"
-      SMTP_PASS:
-        required: false
-        description: "SMTP password"
     outputs:
-      # Python outputs
-      python_build_outcome:
+      build_outcome:
         description: "Resultado del build de Python"
         value: ${{ jobs.python-build.outputs.build_outcome }}
-      python_package_path:
+      package_path:
         description: "Ruta de los paquetes Python construidos"
         value: ${{ jobs.python-build.outputs.package_path }}
-      # JS/TS outputs
-      js_ts_build_outcome:
-        description: "Resultado del build de JS/TS"
-        value: ${{ jobs.js-ts-build.outputs.build_outcome }}
-      js_ts_build_size:
-        description: "Tamaño del build de JS/TS en MB"
-        value: ${{ jobs.js-ts-build.outputs.build_size }}
 
 permissions:
   contents: read
 
 jobs:
-  # ==============================
-  #  PYTHON BUILD
-  # ==============================
   python-build:
     name: Build Python Package
     runs-on: ubuntu-latest
-    if: inputs.language == 'python'
     outputs:
       build_outcome: ${{ steps.build.outcome }}
       package_path: ${{ steps.build.outputs.package_path }}
@@ -102,7 +44,7 @@ jobs:
       - name: Build Python package
         id: build
         run: |
-          echo "📦 Construyendo paquete Python..."
+          echo "Construyendo paquete Python..."
           python -m pip install --upgrade build
 
           set +e
@@ -113,29 +55,29 @@ jobs:
           cat build-output.txt
 
           if [ $BUILD_EXIT -eq 0 ]; then
-            echo "✅ Paquete construido exitosamente"
+            echo "Paquete construido exitosamente"
             ls -lh dist/
 
             # Guardar path para siguiente job
             echo "package_path=dist/" >> $GITHUB_OUTPUT
 
-            # Información sobre los paquetes generados
+            # Informacion sobre los paquetes generados
             WHL_FILE=$(ls dist/*.whl | head -1 || echo "")
             TAR_FILE=$(ls dist/*.tar.gz | head -1 || echo "")
 
             if [ -n "$WHL_FILE" ]; then
               WHL_SIZE=$(du -h "$WHL_FILE" | cut -f1)
-              echo "📦 Wheel: $(basename $WHL_FILE) ($WHL_SIZE)"
+              echo "Wheel: $(basename $WHL_FILE) ($WHL_SIZE)"
             fi
 
             if [ -n "$TAR_FILE" ]; then
               TAR_SIZE=$(du -h "$TAR_FILE" | cut -f1)
-              echo "📦 Tarball: $(basename $TAR_FILE) ($TAR_SIZE)"
+              echo "Tarball: $(basename $TAR_FILE) ($TAR_SIZE)"
             fi
 
             exit 0
           else
-            echo "::error::❌ Build falló"
+            echo "::error::Build fallo"
             exit 1
           fi
 
@@ -154,153 +96,5 @@ jobs:
         with:
           name: python-build-artifacts-${{ github.run_id }}
           path: dist/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ==============================
-  #  JAVASCRIPT/TYPESCRIPT BUILD
-  # ==============================
-  js-ts-build:
-    name: Build JavaScript/TypeScript
-    runs-on: ubuntu-latest
-    if: inputs.language == 'javascript' || inputs.language == 'typescript'
-    env:
-      BASE_URL: ${{ inputs.BASE_URL }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      NEXTAUTH_URL: ${{ inputs.NEXTAUTH_URL }}
-      NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
-      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
-      NEXT_PUBLIC_BASE_URL: ${{ inputs.NEXT_PUBLIC_BASE_URL }}
-      SMTP_HOST: ${{ inputs.SMTP_HOST }}
-      SMTP_PORT: ${{ inputs.SMTP_PORT }}
-      SMTP_USER: ${{ inputs.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      NEXT_TELEMETRY_DISABLED: 1
-      SKIP_ENV_VALIDATION: true
-    outputs:
-      build_outcome: ${{ steps.build.outcome }}
-      build_size: ${{ steps.build.outputs.build_size }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: "npm"
-
-      - name: Install Node dependencies
-        run: npm ci --prefer-offline --no-audit
-
-      - name: Build JS/TS project
-        id: build
-        run: |
-          # Limpiar builds anteriores
-          [ -d ".next" ] && rm -rf .next
-          [ -d "dist" ] && rm -rf dist
-          [ -d "build" ] && rm -rf build
-
-          echo "📦 Construyendo proyecto JS/TS..."
-
-          # Intentar build:ci primero, si no existe usar build
-          if grep -q '"build:ci"' package.json 2>/dev/null; then
-            echo "✅ Ejecutando npm run build:ci"
-            BUILD_CMD="npm run build:ci"
-          else
-            echo "⚠️ Script build:ci no encontrado, usando npm run build"
-            BUILD_CMD="npm run build"
-          fi
-
-          set +e
-          $BUILD_CMD > build-output.txt 2>&1
-          BUILD_EXIT=$?
-          set -e
-
-          cat build-output.txt
-
-          if [ $BUILD_EXIT -eq 0 ]; then
-            echo "✅ Build exitoso"
-
-            # Limpiar cache de Next.js si existe (no es necesario para deployment)
-            if [ -d ".next/cache" ]; then
-              CACHE_SIZE=$(du -sm .next/cache 2>/dev/null | cut -f1 || echo "0")
-              echo "🧹 Eliminando cache de webpack (.next/cache): ${CACHE_SIZE}MB"
-              rm -rf .next/cache
-            fi
-
-            # Detectar directorio de build y calcular tamaño
-            BUILD_SIZE_MB=0
-            BUILD_DIR_FOUND="false"
-
-            if [ -d ".next" ]; then
-              BUILD_SIZE_MB=$(du -sm .next 2>/dev/null | cut -f1 || echo "0")
-              echo "📊 Build size (.next): ${BUILD_SIZE_MB}MB"
-              BUILD_DIR_FOUND="true"
-            elif [ -d "out" ]; then
-              BUILD_SIZE_MB=$(du -sm out 2>/dev/null | cut -f1 || echo "0")
-              echo "📊 Build size (out): ${BUILD_SIZE_MB}MB"
-              BUILD_DIR_FOUND="true"
-            elif [ -d "dist" ]; then
-              BUILD_SIZE_MB=$(du -sm dist 2>/dev/null | cut -f1 || echo "0")
-              echo "📊 Build size (dist): ${BUILD_SIZE_MB}MB"
-              BUILD_DIR_FOUND="true"
-            elif [ -d "build" ]; then
-              BUILD_SIZE_MB=$(du -sm build 2>/dev/null | cut -f1 || echo "0")
-              echo "📊 Build size (build): ${BUILD_SIZE_MB}MB"
-              BUILD_DIR_FOUND="true"
-            fi
-
-            echo "build_size=$BUILD_SIZE_MB" >> $GITHUB_OUTPUT
-
-            # Warning si no se generó ningún directorio de build
-            if [ "$BUILD_DIR_FOUND" == "false" ]; then
-              echo "::warning::⚠️ El build no generó ningún directorio (.next/, dist/, build/)."
-              echo "::warning::Listando directorios generados:"
-              ls -la | grep '^d' | grep -v 'node_modules' | grep -v '.git' || true
-              echo "::warning::Si tu build genera un directorio diferente (ej: out/, public/, lib/), agrégalo al workflow en .github/workflows/build.yml línea 206"
-            fi
-
-            # Warning si el build es muy grande
-            if [ "$BUILD_SIZE_MB" -gt 300 ]; then
-              echo "::warning::Build muy grande ($BUILD_SIZE_MB MB). Considera optimizar."
-            fi
-
-            exit 0
-          else
-            echo "::error::❌ Build falló"
-            exit 1
-          fi
-
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-ts-build-logs-${{ github.run_id }}
-          path: build-output.txt
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Create tarball of build artifacts
-        if: success()
-        run: |
-          echo "📦 Creando tarball de los artifacts del build..."
-          if [ -d ".next" ]; then
-            # Solo incluir .next (el build de Next.js)
-            # Prisma se manejará directamente en el Dockerfile
-            tar -czf build-artifacts.tar.gz .next
-            echo "✅ Tarball creado: $(ls -lh build-artifacts.tar.gz | awk '{print $5}')"
-          else
-            echo "❌ No se encontró directorio .next para comprimir"
-            exit 1
-          fi
-
-      - name: Upload build artifacts for testing
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: js-ts-build-artifacts-${{ github.run_id }}
-          path: build-artifacts.tar.gz
           retention-days: 1
           if-no-files-found: warn

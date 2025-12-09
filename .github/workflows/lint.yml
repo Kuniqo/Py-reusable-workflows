@@ -1,64 +1,36 @@
-name: Lint (Reusable - Universal)
+name: Lint (Reusable - Python)
 
 on:
   workflow_call:
     inputs:
-      language:
-        required: true
-        type: string
-        description: "Lenguaje a lintear: 'python', 'javascript', o 'typescript'"
       python-version:
         required: false
         type: string
         default: "3.12"
-      node-version:
-        required: false
-        type: string
-        default: "20"
       fail-on-lint-errors:
         required: false
         type: boolean
         default: false
-        description: "Fallar el workflow si hay errores de lint (solo para JS/TS)"
-      fail-on-security-audit:
-        required: false
-        type: boolean
-        default: false
-        description: "Fallar el workflow si hay vulnerabilidades críticas/altas (solo para JS/TS)"
+        description: "Fallar el workflow si hay errores de lint"
     outputs:
-      # Python outputs
       has_critical_errors:
-        description: "Número de errores críticos (Python - E series)"
+        description: "Numero de errores criticos (E series)"
         value: ${{ jobs.python-lint.outputs.has_critical_errors }}
       total_errors:
-        description: "Total de errores (Python)"
+        description: "Total de errores"
         value: ${{ jobs.python-lint.outputs.total_errors }}
       total_warnings:
-        description: "Total de warnings (Python)"
+        description: "Total de warnings"
         value: ${{ jobs.python-lint.outputs.total_warnings }}
-      # JS/TS outputs
-      audit_outcome:
-        description: "Resultado del security audit (JS/TS)"
-        value: ${{ jobs.js-ts-lint.outputs.audit_outcome }}
-      lint_outcome:
-        description: "Resultado del lint (JS/TS)"
-        value: ${{ jobs.js-ts-lint.outputs.lint_outcome }}
-      typecheck_outcome:
-        description: "Resultado del type check (JS/TS)"
-        value: ${{ jobs.js-ts-lint.outputs.typecheck_outcome }}
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  # ==============================
-  #  PYTHON LINT (RUFF)
-  # ==============================
   python-lint:
     name: Python Lint (Ruff)
     runs-on: ubuntu-latest
-    if: inputs.language == 'python'
     outputs:
       has_critical_errors: ${{ steps.lint.outputs.has_critical_errors }}
       total_errors: ${{ steps.lint.outputs.total_errors }}
@@ -82,7 +54,7 @@ jobs:
       - name: Run Ruff lint checks
         id: lint
         run: |
-          echo "🔍 Ejecutando Ruff lint checks..."
+          echo "Ejecutando Ruff lint checks..."
 
           # Ejecutar Ruff y capturar salida
           set +e
@@ -93,11 +65,11 @@ jobs:
           cat ruff-output.txt
 
           # Contar errores por severidad
-          # Errores críticos: Solo E series (sintaxis, indentación, comparaciones)
+          # Errores criticos: Solo E series (sintaxis, indentacion, comparaciones)
           CRITICAL_ERRORS=$(grep -E "\[E[0-9]{3}\]" ruff-output.txt 2>/dev/null | wc -l || echo "0")
           CRITICAL_ERRORS=$(echo "$CRITICAL_ERRORS" | tr -d '[:space:]')
 
-          # Contar total de líneas de error
+          # Contar total de lineas de error
           TOTAL_ERRORS=$(grep "^Error:" ruff-output.txt 2>/dev/null | wc -l || echo "0")
           TOTAL_ERRORS=$(echo "$TOTAL_ERRORS" | tr -d '[:space:]')
 
@@ -105,7 +77,7 @@ jobs:
           TOTAL_WARNINGS=$(grep "^Warning:" ruff-output.txt 2>/dev/null | wc -l || echo "0")
           TOTAL_WARNINGS=$(echo "$TOTAL_WARNINGS" | tr -d '[:space:]')
 
-          # Asegurar que son números válidos
+          # Asegurar que son numeros validos
           CRITICAL_ERRORS=${CRITICAL_ERRORS:-0}
           TOTAL_ERRORS=${TOTAL_ERRORS:-0}
           TOTAL_WARNINGS=${TOTAL_WARNINGS:-0}
@@ -115,147 +87,21 @@ jobs:
           echo "total_errors=${TOTAL_ERRORS}" >> "$GITHUB_OUTPUT"
           echo "total_warnings=${TOTAL_WARNINGS}" >> "$GITHUB_OUTPUT"
 
-          echo "📊 Resultados del linting:"
-          echo "  🔴 Errores críticos (E series): ${CRITICAL_ERRORS}"
-          echo "  ⚠️  Total de errores: ${TOTAL_ERRORS}"
-          echo "  💡 Warnings: ${TOTAL_WARNINGS}"
+          echo "Resultados del linting:"
+          echo "  Errores criticos (E series): ${CRITICAL_ERRORS}"
+          echo "  Total de errores: ${TOTAL_ERRORS}"
+          echo "  Warnings: ${TOTAL_WARNINGS}"
 
           # Evaluar resultados
           if [ "${CRITICAL_ERRORS}" -gt 0 ]; then
-            echo "❌ FALLA: Se encontraron ${CRITICAL_ERRORS} errores críticos (E series)"
-            echo "::error::Se encontraron ${CRITICAL_ERRORS} errores críticos de sintaxis/estructura que deben corregirse"
+            echo "FALLA: Se encontraron ${CRITICAL_ERRORS} errores criticos (E series)"
+            echo "::error::Se encontraron ${CRITICAL_ERRORS} errores criticos de sintaxis/estructura que deben corregirse"
             exit 1
           elif [ "${TOTAL_ERRORS}" -gt 0 ]; then
-            echo "⚠️ Se encontraron ${TOTAL_ERRORS} errores no críticos (imports no usados, variables, etc.)"
+            echo "Se encontraron ${TOTAL_ERRORS} errores no criticos (imports no usados, variables, etc.)"
             echo "::warning::Se encontraron ${TOTAL_ERRORS} errores de estilo/calidad. Ejecuta 'ruff check . --fix' localmente para corregir"
             exit 0
           else
-            echo "✅ Ruff pasó sin errores"
+            echo "Ruff paso sin errores"
             exit 0
           fi
-
-  # ==============================
-  #  JAVASCRIPT/TYPESCRIPT LINT (ESLINT)
-  # ==============================
-  js-ts-lint:
-    name: JavaScript/TypeScript Lint (ESLint)
-    runs-on: ubuntu-latest
-    if: inputs.language == 'javascript' || inputs.language == 'typescript'
-    outputs:
-      audit_outcome: ${{ steps.audit.outcome }}
-      lint_outcome: ${{ steps.lint.outcome }}
-      typecheck_outcome: ${{ steps.typecheck.outcome }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node-version }}
-          cache: "npm"
-
-      - name: Install Node dependencies
-        run: npm ci --prefer-offline --no-audit
-
-      - name: Security Audit
-        id: audit
-        continue-on-error: ${{ !inputs.fail-on-security-audit }}
-        run: |
-          npm audit --audit-level=high > audit-output.txt 2>&1 || AUDIT_FAILED=1
-          cat audit-output.txt
-
-          # Extraer conteo de vulnerabilidades
-          if grep -q "found 0 vulnerabilities" audit-output.txt; then
-            echo "✅ Sin vulnerabilidades críticas/altas"
-            exit 0
-          fi
-
-          # Contar vulnerabilidades por severidad
-          CRITICAL=$(grep -oP '\d+(?= critical)' audit-output.txt | head -1 || echo "0")
-          HIGH=$(grep -oP '\d+(?= high)' audit-output.txt | head -1 || echo "0")
-          MODERATE=$(grep -oP '\d+(?= moderate)' audit-output.txt | head -1 || echo "0")
-          LOW=$(grep -oP '\d+(?= low)' audit-output.txt | head -1 || echo "0")
-
-          echo "📊 Vulnerabilidades encontradas:"
-          echo "  - 🔴 Críticas: $CRITICAL"
-          echo "  - 🟠 Altas: $HIGH"
-          echo "  - 🟡 Moderadas: $MODERATE"
-          echo "  - 🟢 Bajas: $LOW"
-
-          # Crear warning/error en GitHub
-          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
-            echo "::error::Se encontraron $CRITICAL vulnerabilidades críticas y $HIGH altas"
-            echo "::error::Ejecuta 'npm audit fix' localmente para corregir"
-            exit 1
-          else
-            echo "::warning::Se encontraron $MODERATE vulnerabilidades moderadas y $LOW bajas"
-            exit 0
-          fi
-
-      - name: Run ESLint
-        id: lint
-        continue-on-error: ${{ !inputs.fail-on-lint-errors }}
-        run: |
-          set +e
-          npm run lint > lint-output.txt 2>&1
-          LINT_EXIT=$?
-          set -e
-
-          cat lint-output.txt
-
-          if [ $LINT_EXIT -eq 0 ]; then
-            echo "✅ ESLint pasó sin errores"
-            exit 0
-          else
-            # Contar errores y warnings
-            ERRORS=$(grep -oP '\d+(?= errors?)' lint-output.txt | head -1 || echo "0")
-            WARNINGS=$(grep -oP '\d+(?= warnings?)' lint-output.txt | head -1 || echo "0")
-
-            echo "📊 Resultados del linting:"
-            echo "  - 🔴 Errores: $ERRORS"
-            echo "  - ⚠️  Warnings: $WARNINGS"
-
-            if [ "$ERRORS" -gt 0 ]; then
-              echo "::error::Se encontraron $ERRORS errores de ESLint. Ejecuta 'npm run lint -- --fix' localmente para corregir"
-              exit 1
-            else
-              echo "::warning::Se encontraron $WARNINGS warnings de ESLint"
-              exit 0
-            fi
-          fi
-
-      - name: Type check
-        id: typecheck
-        if: inputs.language == 'typescript'
-        continue-on-error: ${{ !inputs.fail-on-lint-errors }}
-        run: |
-          set +e
-          npm run typecheck > typecheck-output.txt 2>&1
-          TYPECHECK_EXIT=$?
-          set -e
-
-          cat typecheck-output.txt
-
-          if [ $TYPECHECK_EXIT -eq 0 ]; then
-            echo "✅ Type check pasó sin errores"
-            exit 0
-          else
-            # Contar errores de tipo
-            TYPE_ERRORS=$(grep -oP 'Found \K\d+(?= errors?)' typecheck-output.txt | head -1 || echo "0")
-            echo "::error::Se encontraron $TYPE_ERRORS errores de tipo. Revisa el output de 'npm run typecheck'"
-            exit 1
-          fi
-
-      - name: Upload lint logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lint-logs-${{ inputs.language }}-${{ github.run_id }}
-          path: |
-            audit-output.txt
-            lint-output.txt
-            typecheck-output.txt
-          retention-days: 7
-          if-no-files-found: ignore

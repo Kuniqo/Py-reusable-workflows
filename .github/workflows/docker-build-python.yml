@@ -41,6 +41,11 @@ on:
         type: string
         default: ""
         description: "Build args (formato: KEY1=val1,KEY2=val2)"
+      no-cache:
+        required: false
+        type: boolean
+        default: false
+        description: "Deshabilitar caché de Docker para build limpio"
     secrets:
       CR_PAT:
         required: false
@@ -111,8 +116,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ steps.build-args.outputs.args }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.no-cache }}
+          cache-from: ${{ inputs.no-cache == false && 'type=gha' || '' }}
+          cache-to: ${{ inputs.no-cache == false && 'type=gha,mode=max' || '' }}
 
       - name: Run Trivy vulnerability scanner
         if: inputs.push-image == true

@@ -36,10 +36,8 @@ on:
         default: ""
         description: "Build args para Docker (formato: KEY1=val1,KEY2=val2 o multilinea KEY=val)"
 
-permissions:
-  contents: read
-  pull-requests: write
-  packages: write
+# Permissions are inherited from the caller workflow
+# The caller must define the required permissions
 
 jobs:
   # ==============================

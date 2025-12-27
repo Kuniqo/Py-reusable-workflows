@@ -85,8 +85,8 @@ jobs:
             # Tag name (for semantic versioning)
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # SHA
-            type=sha,prefix={{branch}}-
+            # SHA (short format, no prefix for PRs)
+            type=sha,format=short
             # Latest (only for default branch)
             type=raw,value=latest,enable={{is_default_branch}}
 

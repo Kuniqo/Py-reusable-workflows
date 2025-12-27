@@ -15,6 +15,9 @@ on:
         description: "Ruta de los paquetes Python construidos"
         value: ${{ jobs.python-build.outputs.package_path }}
 
+permissions:
+  contents: read
+
 jobs:
   python-build:
     name: Build Python Package

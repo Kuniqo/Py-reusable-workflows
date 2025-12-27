@@ -35,9 +35,10 @@ on:
         type: string
         default: ""
         description: "Build args para Docker (formato: KEY1=val1,KEY2=val2 o multilinea KEY=val)"
-
-# Permissions are inherited from the caller workflow
-# The caller must define the required permissions
+    secrets:
+      GITHUB_TOKEN:
+        required: false
+        description: "GitHub token for API access"
 
 jobs:
   # ==============================

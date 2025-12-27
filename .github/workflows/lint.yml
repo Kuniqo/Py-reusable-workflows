@@ -23,10 +23,6 @@ on:
         description: "Total de warnings"
         value: ${{ jobs.python-lint.outputs.total_warnings }}
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   python-lint:
     name: Python Lint (Ruff)

@@ -37,10 +37,6 @@ on:
         description: "Si el coverage cumple con el minimo"
         value: ${{ jobs.python-tests.outputs.coverage_ok }}
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   python-tests:
     name: Python Tests & Coverage

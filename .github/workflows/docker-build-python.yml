@@ -42,13 +42,9 @@ on:
         default: ""
         description: "Build args (formato: KEY1=val1,KEY2=val2)"
     secrets:
-      CR_PAT:
+      GITHUB_TOKEN:
         required: false
-        description: "Personal Access Token para GHCR (usa secrets.GITHUB_TOKEN si no está disponible)"
-
-permissions:
-  contents: read
-  packages: write
+        description: "GitHub token for package registry access"
 
 jobs:
   build-and-push:
@@ -70,7 +66,7 @@ jobs:
         with:
           registry: ${{ inputs.docker-registry }}
           username: ${{ vars.GHCR_USERNAME || github.actor }}
-          password: ${{ secrets.CR_PAT || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (tags, labels)
         id: meta
